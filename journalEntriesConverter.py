@@ -38,6 +38,10 @@ class JournalEntriesConverter:
         else:
             raise ValueError("Unsupported file format. Please use CSV, XLSX, or PDF.")
     
+    def convert_file(self, file_path):
+        """Alias for convert() to match API convention"""
+        return self.convert(file_path)
+    
     def parse_csv(self, file_path):
         """Parse CSV format journal entries"""
         with open(file_path, 'r', encoding='utf-8-sig') as file:
