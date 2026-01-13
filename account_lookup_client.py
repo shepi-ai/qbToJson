@@ -14,7 +14,9 @@ logger = logging.getLogger(__name__)
 class AccountLookupClient:
     """Client for looking up account IDs from the API"""
     
-    def __init__(self, api_base_url: str = "http://localhost:8080"):
+    def __init__(self, api_base_url: str = None):
+        if api_base_url is None:
+            api_base_url = "http://localhost:8080"
         self.api_base_url = api_base_url.rstrip('/')
         self.cache = {}  # Local cache to avoid repeated API calls
         
