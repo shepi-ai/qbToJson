@@ -17,7 +17,7 @@ class JournalEntriesConverter:
         """
         self.use_account_lookup = use_account_lookup
         if use_account_lookup:
-            self.lookup_client = AccountLookupClient(base_url=api_base_url)
+            self.lookup_client = AccountLookupClient(api_base_url=api_base_url)
         self.account_cache = {}
         self.transactions = []
         
