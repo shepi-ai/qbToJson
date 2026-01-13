@@ -29,11 +29,14 @@ class JournalEntriesConverter:
         :param file_path: Path to the input file
         :return: List of journal entry dictionaries
         """
-        if file_path.lower().endswith('.csv'):
+        # Convert Path object to string if needed
+        file_path_str = str(file_path)
+        
+        if file_path_str.lower().endswith('.csv'):
             return self.parse_csv(file_path)
-        elif file_path.lower().endswith('.xlsx'):
+        elif file_path_str.lower().endswith('.xlsx'):
             return self.parse_xlsx(file_path)
-        elif file_path.lower().endswith('.pdf'):
+        elif file_path_str.lower().endswith('.pdf'):
             return self.parse_pdf(file_path)
         else:
             raise ValueError("Unsupported file format. Please use CSV, XLSX, or PDF.")
