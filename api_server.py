@@ -12,6 +12,7 @@ from pathlib import Path
 from io import BytesIO
 import traceback
 from werkzeug.utils import secure_filename
+from functools import wraps
 
 # Import our converters
 from accountsConverter import AccountsConverter
@@ -26,6 +27,7 @@ from accountsReceivableConverter import AccountsReceivableConverter
 from customerConcentrationConverter import CustomerConcentrationConverter
 from vendorConcentrationConverter import VendorConcentrationConverter
 from batch_processor import BatchProcessor
+from accountsInferenceConverter import convert_general_ledger_to_coa
 
 # Import database client
 from db_client import get_db_client
@@ -39,6 +41,37 @@ db_client = get_db_client()
 # Configure upload settings
 ALLOWED_EXTENSIONS = {'csv', 'xlsx', 'pdf'}
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+
+# API Key Authentication
+def require_api_key(f):
+    """Decorator to require API key authentication"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # Get API key from header
+        provided_key = request.headers.get('x-api-key')
+        expected_key = os.getenv('QBTOJSON_API_KEY')
+
+        # DEBUG LOGGING
+        print(f"🔑 API Key Check:")
+        print(f"  - Provided: {provided_key[:10] if provided_key else 'None'}... (len={len(provided_key) if provided_key else 0})")
+        print(f"  - Expected: {expected_key[:10] if expected_key else 'None'}... (len={len(expected_key) if expected_key else 0})")
+        print(f"  - Match: {provided_key == expected_key if provided_key and expected_key else False}")
+
+        # Check if API key is valid
+        if not provided_key or not expected_key:
+            return jsonify({
+                "error": "Unauthorized",
+                "details": "API key required. Include 'x-api-key' header."
+            }), 401
+
+        if provided_key != expected_key:
+            return jsonify({
+                "error": "Unauthorized",
+                "details": "Invalid API key"
+            }), 401
+        
+        return f(*args, **kwargs)
+    return decorated_function
 
 def allowed_file(filename):
     """Check if file extension is allowed"""
@@ -61,51 +94,6 @@ def validate_file(file):
         return False, f"File too large. Maximum size: {MAX_FILE_SIZE / 1024 / 1024}MB"
     
     return True, None
-
-def save_to_database_if_requested(result, data_type, file):
-    """
-    Save result to database if requested via form parameters
-    
-    Args:
-        result: Converted data
-        data_type: Type of document (e.g., 'trial_balance')
-        file: Uploaded file object
-        
-    Returns:
-        Dict with saved status and details
-    """
-    # Check if database save is requested
-    save_to_db = request.form.get('save_to_db', 'false').lower() == 'true'
-    
-    if not save_to_db:
-        return {'saved_to_db': False}
-    
-    # Get project_id from form
-    project_id = request.form.get('project_id')
-    
-    if not project_id:
-        return {
-            'saved_to_db': False,
-            'db_error': 'project_id required when save_to_db=true'
-        }
-    
-    # Optional parameters
-    source_document_id = request.form.get('source_document_id')
-    
-    # Attempt to save
-    success = db_client.save_converted_data(
-        project_id=project_id,
-        data_type=data_type,
-        data=result,
-        source_document_id=source_document_id,
-        filename=secure_filename(file.filename)
-    )
-    
-    return {
-        'saved_to_db': success,
-        'project_id': project_id if success else None,
-        'db_configured': db_client.is_configured()
-    }
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -146,6 +134,7 @@ def health_check():
 accounts_cache = {}
 
 @app.route('/api/accounts/lookup', methods=['POST'])
+@require_api_key
 def lookup_account():
     """
     Look up account ID by name
@@ -189,7 +178,103 @@ def lookup_account():
             "details": str(e)
         }), 500
 
+@app.route('/api/accounts/derive-from-gl', methods=['POST'])
+@require_api_key
+def derive_accounts_from_gl():
+    """
+    Derive Chart of Accounts from General Ledger data
+    
+    This endpoint analyzes General Ledger transactions to infer account classifications
+    and generate a Chart of Accounts in qbToJson format.
+    
+    Request body: {
+        "project_id": "uuid",
+        "save_to_db": true/false (optional, default: false),
+        "source_gl_id": "uuid" (optional, ID of the source GL data)
+    }
+    
+    Returns: Array of accounts in qbToJson format with inferred classifications
+    """
+    try:
+        # Get request data
+        data = request.get_json()
+        if not data or 'project_id' not in data:
+            return jsonify({"error": "project_id required"}), 400
+        
+        project_id = data['project_id']
+        save_to_db = data.get('save_to_db', False)
+        source_gl_id = data.get('source_gl_id')
+        
+        # Check if database is configured
+        if not db_client.is_configured():
+            return jsonify({
+                "error": "Database not configured",
+                "details": "SUPABASE_URL and SUPABASE_KEY must be set"
+            }), 503
+        
+        # Fetch General Ledger data from database
+        gl_data = db_client.get_processed_data(
+            project_id=project_id,
+            data_type='general_ledger',
+            limit=1
+        )
+        
+        if not gl_data or len(gl_data) == 0:
+            return jsonify({
+                "error": "No General Ledger data found",
+                "details": f"No general_ledger data found for project {project_id}"
+            }), 404
+        
+        # Get the most recent GL data
+        gl_record = gl_data[0]
+        gl_json = gl_record.get('data', {})
+        
+        if not gl_json:
+            return jsonify({
+                "error": "Invalid General Ledger data",
+                "details": "GL data is empty or malformed"
+            }), 400
+        
+        # Derive Chart of Accounts using inference engine
+        app.logger.info(f"Deriving Chart of Accounts from GL for project {project_id}")
+        derived_coa = convert_general_ledger_to_coa(gl_json)
+        
+        # Optionally save to database
+        saved_to_db = False
+        if save_to_db:
+            saved_to_db = db_client.save_converted_data(
+                project_id=project_id,
+                data_type='chart_of_accounts',
+                data=derived_coa,
+                source_document_id=source_gl_id,
+                filename='derived_from_gl.json'
+            )
+            
+            # Also update the in-memory cache
+            global accounts_cache
+            accounts_cache = {acc['id']: acc for acc in derived_coa}
+        
+        # Return derived Chart of Accounts
+        return jsonify({
+            "success": True,
+            "data": derived_coa,
+            "count": len(derived_coa),
+            "derived_from": "general_ledger",
+            "project_id": project_id,
+            "saved_to_db": saved_to_db,
+            "message": f"Successfully derived {len(derived_coa)} accounts from General Ledger"
+        })
+        
+    except Exception as e:
+        app.logger.error(f"Error deriving accounts from GL: {str(e)}")
+        app.logger.error(traceback.format_exc())
+        return jsonify({
+            "error": "Failed to derive Chart of Accounts",
+            "details": str(e)
+        }), 500
+
 @app.route('/api/accounts/load', methods=['POST'])
+@require_api_key
 def load_accounts():
     """
     Load Chart of Accounts into memory for lookups
@@ -244,6 +329,7 @@ def load_accounts():
         }), 500
 
 @app.route('/api/convert/accounts', methods=['POST'])
+@require_api_key
 def convert_accounts():
     """
     Convert Chart of Accounts document to JSON
@@ -277,16 +363,12 @@ def convert_accounts():
             global accounts_cache
             accounts_cache = {acc['id']: acc for acc in result}
             
-            # Save to database if requested
-            db_result = save_to_database_if_requested(result, 'chart_of_accounts', file)
-            
             # Return JSON response
             return jsonify({
                 "success": True,
                 "data": result,
                 "count": len(result),
-                "filename": secure_filename(file.filename),
-                **db_result
+                "filename": secure_filename(file.filename)
             })
             
         finally:
@@ -303,6 +385,7 @@ def convert_accounts():
         }), 500
 
 @app.route('/api/convert/balance-sheet', methods=['POST'])
+@require_api_key
 def convert_balance_sheet():
     """
     Convert Balance Sheet document to JSON
@@ -332,16 +415,13 @@ def convert_balance_sheet():
             converter = BalanceSheetConverter()
             result = converter.convert_file(tmp_path)
             
-            # Save to database if requested
-            db_result = save_to_database_if_requested(result, 'balance_sheet', file)
-            
+            # Save to database if requested            
             # Return JSON response
             return jsonify({
                 "success": True,
                 "data": result,
                 "months": len(result),
-                "filename": secure_filename(file.filename),
-                **db_result
+                "filename": secure_filename(file.filename)
             })
             
         finally:
@@ -358,6 +438,7 @@ def convert_balance_sheet():
         }), 500
 
 @app.route('/api/convert/profit-loss', methods=['POST'])
+@require_api_key
 def convert_profit_loss():
     """
     Convert Profit and Loss document to JSON
@@ -387,16 +468,13 @@ def convert_profit_loss():
             converter = ProfitLossConverter()
             result = converter.convert_file(tmp_path)
             
-            # Save to database if requested
-            db_result = save_to_database_if_requested(result, 'income_statement', file)
-            
+            # Save to database if requested            
             # Return JSON response
             return jsonify({
                 "success": True,
                 "data": result,
                 "months": len(result),
-                "filename": secure_filename(file.filename),
-                **db_result
+                "filename": secure_filename(file.filename)
             })
             
         finally:
@@ -413,6 +491,7 @@ def convert_profit_loss():
         }), 500
 
 @app.route('/api/convert/trial-balance', methods=['POST'])
+@require_api_key
 def convert_trial_balance():
     """
     Convert Trial Balance document to JSON
@@ -442,16 +521,13 @@ def convert_trial_balance():
             converter = TrialBalanceConverter()
             result = converter.convert_file(tmp_path)
             
-            # Save to database if requested
-            db_result = save_to_database_if_requested(result, 'trial_balance', file)
-            
+            # Save to database if requested            
             # Return JSON response
             return jsonify({
                 "success": True,
                 "data": result,
                 "months": len(result.get('monthlyReports', [])),
-                "filename": secure_filename(file.filename),
-                **db_result
+                "filename": secure_filename(file.filename)
             })
             
         finally:
@@ -468,6 +544,7 @@ def convert_trial_balance():
         }), 500
 
 @app.route('/api/convert/cash-flow', methods=['POST'])
+@require_api_key
 def convert_cash_flow():
     """
     Convert Cash Flow Statement document to JSON
@@ -497,16 +574,13 @@ def convert_cash_flow():
             converter = CashFlowConverter()
             result = converter.convert_file(tmp_path)
             
-            # Save to database if requested
-            db_result = save_to_database_if_requested(result, 'cash_flow', file)
-            
+            # Save to database if requested            
             # Return JSON response
             return jsonify({
                 "success": True,
                 "data": result,
                 "months": len(result),
-                "filename": secure_filename(file.filename),
-                **db_result
+                "filename": secure_filename(file.filename)
             })
             
         finally:
@@ -523,12 +597,15 @@ def convert_cash_flow():
         }), 500
 
 @app.route('/api/convert/general-ledger', methods=['POST'])
+@require_api_key
 def convert_general_ledger():
     """
     Convert General Ledger document to JSON
     
     Accepts: CSV, XLSX, or PDF file
     Returns: JSON object with general ledger data
+    
+    Auto-derives Chart of Accounts if none exists for the project
     """
     try:
         # Check if file is in request
@@ -551,17 +628,13 @@ def convert_general_ledger():
             # Convert file
             converter = GeneralLedgerConverter()
             result = converter.convert_file(tmp_path)
-            
-            # Save to database if requested
-            db_result = save_to_database_if_requested(result, 'general_ledger', file)
-            
+
             # Return JSON response
             return jsonify({
                 "success": True,
                 "data": result,
                 "accounts": len(result.get('rows', {}).get('row', [])),
-                "filename": secure_filename(file.filename),
-                **db_result
+                "filename": secure_filename(file.filename)
             })
             
         finally:
@@ -578,6 +651,7 @@ def convert_general_ledger():
         }), 500
 
 @app.route('/api/convert/journal-entries', methods=['POST'])
+@require_api_key
 def convert_journal_entries():
     """Convert Journal Entries document to JSON"""
     try:
@@ -595,8 +669,7 @@ def convert_journal_entries():
         try:
             converter = JournalEntriesConverter()
             result = converter.convert_file(tmp_path)
-            db_result = save_to_database_if_requested(result, 'journal_entries', file)
-            return jsonify({"success": True, "data": result, "filename": secure_filename(file.filename), **db_result})
+            return jsonify({"success": True, "data": result, "filename": secure_filename(file.filename)})
         finally:
             if tmp_path.exists():
                 tmp_path.unlink()
@@ -605,6 +678,7 @@ def convert_journal_entries():
         return jsonify({"error": "Failed to convert file", "details": str(e)}), 500
 
 @app.route('/api/convert/accounts-payable', methods=['POST'])
+@require_api_key
 def convert_accounts_payable():
     """Convert Accounts Payable document to JSON"""
     try:
@@ -622,8 +696,7 @@ def convert_accounts_payable():
         try:
             converter = AccountsPayableConverter()
             result = converter.convert_file(tmp_path)
-            db_result = save_to_database_if_requested(result, 'accounts_payable', file)
-            return jsonify({"success": True, "data": result, "count": len(result), "filename": secure_filename(file.filename), **db_result})
+            return jsonify({"success": True, "data": result, "count": len(result), "filename": secure_filename(file.filename)})
         finally:
             if tmp_path.exists():
                 tmp_path.unlink()
@@ -632,6 +705,7 @@ def convert_accounts_payable():
         return jsonify({"error": "Failed to convert file", "details": str(e)}), 500
 
 @app.route('/api/convert/accounts-receivable', methods=['POST'])
+@require_api_key
 def convert_accounts_receivable():
     """Convert Accounts Receivable document to JSON"""
     try:
@@ -649,8 +723,7 @@ def convert_accounts_receivable():
         try:
             converter = AccountsReceivableConverter()
             result = converter.convert_file(tmp_path)
-            db_result = save_to_database_if_requested(result, 'accounts_receivable', file)
-            return jsonify({"success": True, "data": result, "count": len(result), "filename": secure_filename(file.filename), **db_result})
+            return jsonify({"success": True, "data": result, "count": len(result), "filename": secure_filename(file.filename)})
         finally:
             if tmp_path.exists():
                 tmp_path.unlink()
@@ -659,6 +732,7 @@ def convert_accounts_receivable():
         return jsonify({"error": "Failed to convert file", "details": str(e)}), 500
 
 @app.route('/api/convert/customer-concentration', methods=['POST'])
+@require_api_key
 def convert_customer_concentration():
     """Convert Customer Concentration document to JSON"""
     try:
@@ -676,8 +750,7 @@ def convert_customer_concentration():
         try:
             converter = CustomerConcentrationConverter()
             result = converter.convert_file(tmp_path)
-            db_result = save_to_database_if_requested(result, 'customer_concentration', file)
-            return jsonify({"success": True, "data": result, "count": len(result), "filename": secure_filename(file.filename), **db_result})
+            return jsonify({"success": True, "data": result, "count": len(result), "filename": secure_filename(file.filename)})
         finally:
             if tmp_path.exists():
                 tmp_path.unlink()
@@ -686,6 +759,7 @@ def convert_customer_concentration():
         return jsonify({"error": "Failed to convert file", "details": str(e)}), 500
 
 @app.route('/api/convert/vendor-concentration', methods=['POST'])
+@require_api_key
 def convert_vendor_concentration():
     """Convert Vendor Concentration document to JSON"""
     try:
@@ -703,8 +777,7 @@ def convert_vendor_concentration():
         try:
             converter = VendorConcentrationConverter()
             result = converter.convert_file(tmp_path)
-            db_result = save_to_database_if_requested(result, 'vendor_concentration', file)
-            return jsonify({"success": True, "data": result, "count": len(result), "filename": secure_filename(file.filename), **db_result})
+            return jsonify({"success": True, "data": result, "count": len(result), "filename": secure_filename(file.filename)})
         finally:
             if tmp_path.exists():
                 tmp_path.unlink()
@@ -744,6 +817,7 @@ def convert_from_storage_helper(converter_class, data_type, file_path, project_i
             tmp_path.unlink()
 
 @app.route('/api/convert-from-storage/trial-balance', methods=['POST'])
+@require_api_key
 def convert_trial_balance_from_storage():
     """Convert Trial Balance from Supabase Storage"""
     try:
@@ -766,6 +840,7 @@ def convert_trial_balance_from_storage():
         return jsonify({"error": "Failed to convert", "details": str(e)}), 500
 
 @app.route('/api/convert-from-storage/balance-sheet', methods=['POST'])
+@require_api_key
 def convert_balance_sheet_from_storage():
     """Convert Balance Sheet from Supabase Storage"""
     try:
@@ -786,6 +861,7 @@ def convert_balance_sheet_from_storage():
         return jsonify({"error": "Failed to convert", "details": str(e)}), 500
 
 @app.route('/api/convert-from-storage/profit-loss', methods=['POST'])
+@require_api_key
 def convert_profit_loss_from_storage():
     """Convert Profit & Loss from Supabase Storage"""
     try:
@@ -806,6 +882,7 @@ def convert_profit_loss_from_storage():
         return jsonify({"error": "Failed to convert", "details": str(e)}), 500
 
 @app.route('/api/convert-from-storage/cash-flow', methods=['POST'])
+@require_api_key
 def convert_cash_flow_from_storage():
     """Convert Cash Flow from Supabase Storage"""
     try:
@@ -826,6 +903,7 @@ def convert_cash_flow_from_storage():
         return jsonify({"error": "Failed to convert", "details": str(e)}), 500
 
 @app.route('/api/convert-from-storage/general-ledger', methods=['POST'])
+@require_api_key
 def convert_general_ledger_from_storage():
     """Convert General Ledger from Supabase Storage"""
     try:
@@ -847,6 +925,7 @@ def convert_general_ledger_from_storage():
         return jsonify({"error": "Failed to convert", "details": str(e)}), 500
 
 @app.route('/api/convert-from-storage/accounts', methods=['POST'])
+@require_api_key
 def convert_accounts_from_storage():
     """Convert Chart of Accounts from Supabase Storage"""
     try:
@@ -867,6 +946,7 @@ def convert_accounts_from_storage():
         return jsonify({"error": "Failed to convert", "details": str(e)}), 500
 
 @app.route('/api/convert-from-storage/journal-entries', methods=['POST'])
+@require_api_key
 def convert_journal_entries_from_storage():
     """Convert Journal Entries from Supabase Storage"""
     try:
@@ -887,6 +967,7 @@ def convert_journal_entries_from_storage():
         return jsonify({"error": "Failed to convert", "details": str(e)}), 500
 
 @app.route('/api/convert-from-storage/accounts-payable', methods=['POST'])
+@require_api_key
 def convert_accounts_payable_from_storage():
     """Convert Accounts Payable from Supabase Storage"""
     try:
@@ -907,6 +988,7 @@ def convert_accounts_payable_from_storage():
         return jsonify({"error": "Failed to convert", "details": str(e)}), 500
 
 @app.route('/api/convert-from-storage/accounts-receivable', methods=['POST'])
+@require_api_key
 def convert_accounts_receivable_from_storage():
     """Convert Accounts Receivable from Supabase Storage"""
     try:
@@ -927,6 +1009,7 @@ def convert_accounts_receivable_from_storage():
         return jsonify({"error": "Failed to convert", "details": str(e)}), 500
 
 @app.route('/api/convert-from-storage/customer-concentration', methods=['POST'])
+@require_api_key
 def convert_customer_concentration_from_storage():
     """Convert Customer Concentration from Supabase Storage"""
     try:
@@ -947,6 +1030,7 @@ def convert_customer_concentration_from_storage():
         return jsonify({"error": "Failed to convert", "details": str(e)}), 500
 
 @app.route('/api/convert-from-storage/vendor-concentration', methods=['POST'])
+@require_api_key
 def convert_vendor_concentration_from_storage():
     """Convert Vendor Concentration from Supabase Storage"""
     try:
@@ -1139,6 +1223,7 @@ def internal_error(error):
 
 # Batch processing endpoints
 @app.route('/api/batch/balance-sheet', methods=['POST'])
+@require_api_key
 def batch_balance_sheet():
     """
     Process multiple Balance Sheet files and consolidate them
@@ -1195,6 +1280,7 @@ def batch_balance_sheet():
         }), 500
 
 @app.route('/api/batch/profit-loss', methods=['POST'])
+@require_api_key
 def batch_profit_loss():
     """
     Process multiple Profit & Loss files and consolidate them
@@ -1251,6 +1337,7 @@ def batch_profit_loss():
         }), 500
 
 @app.route('/api/batch/trial-balance', methods=['POST'])
+@require_api_key
 def batch_trial_balance():
     """
     Process multiple Trial Balance files and consolidate them
@@ -1307,6 +1394,7 @@ def batch_trial_balance():
         }), 500
 
 @app.route('/api/batch/cash-flow', methods=['POST'])
+@require_api_key
 def batch_cash_flow():
     """
     Process multiple Cash Flow Statement files and consolidate them
@@ -1363,6 +1451,7 @@ def batch_cash_flow():
         }), 500
 
 @app.route('/api/batch/general-ledger', methods=['POST'])
+@require_api_key
 def batch_general_ledger():
     """
     Process multiple General Ledger files and consolidate them
@@ -1419,6 +1508,7 @@ def batch_general_ledger():
         }), 500
 
 @app.route('/api/batch/mixed', methods=['POST'])
+@require_api_key
 def batch_mixed():
     """
     Process multiple mixed financial documents and group by type
