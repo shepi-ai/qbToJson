@@ -357,7 +357,7 @@ class JournalEntriesConverter:
             return self.account_cache[account_name]
         
         # Lookup via API
-        account_id = self.lookup_client.lookup_account(account_name)
+        account_id = self.lookup_client.lookup_account_id(account_name)
         if account_id:
             self.account_cache[account_name] = account_id
         
