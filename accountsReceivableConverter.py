@@ -516,95 +516,156 @@ class AccountsReceivableConverter:
         sub_customers = []
         parent_totals = {'current': 0.0, '1_30': 0.0, '31_60': 0.0, '61_90': 0.0, '91_over': 0.0, 'total': 0.0}
         
+        print("[AR-PARSER] Starting PDF parse")
+        
         with pdfplumber.open(filepath) as pdf:
             for page in pdf.pages:
-                tables = page.extract_tables()
-                if tables:
-                    for table in tables:
-                        header_row_idx = -1
-                        for i, row in enumerate(table):
-                            if row and any(cell and 'Customer' in str(cell) for cell in row):
-                                header_row_idx = i
-                                break
+                # Extract text instead of tables (AR PDFs don't have table structure)
+                text = page.extract_text()
+                if not text:
+                    continue
+                
+                lines = text.split('\n')
+                print(f"[AR-PARSER] Page has {len(lines)} lines")
+                
+                # Find header row
+                header_idx = -1
+                for i, line in enumerate(lines):
+                    if 'CUSTOMER' in line.upper() and ('CURRENT' in line.upper() or 'TOTAL' in line.upper()):
+                        header_idx = i
+                        print(f"[AR-PARSER] Found header at line {i}")
+                        break
+                
+                if header_idx == -1:
+                    continue
+                
+                # Parse data lines
+                for line in lines[header_idx + 1:]:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    # Check for TOTAL line
+                    if line.upper().startswith('TOTAL') and not line.startswith('Total for'):
+                        # Extract amounts from end of line
+                        amounts = re.findall(r'[\d,]+\.\d{2}', line)
+                        if len(amounts) >= 6:
+                            totals['current'] = self.parse_amount(amounts[0])
+                            totals['1_30'] = self.parse_amount(amounts[1])
+                            totals['31_60'] = self.parse_amount(amounts[2])
+                            totals['61_90'] = self.parse_amount(amounts[3])
+                            totals['91_over'] = self.parse_amount(amounts[4])
+                            totals['total'] = self.parse_amount(amounts[5])
+                        print(f"[AR-PARSER] Found TOTAL row: {totals}")
+                        break
+                    
+                    # Check for "Total for" line (sub-customer total)
+                    if line.startswith('Total for '):
+                        if current_parent and sub_customers:
+                            parent_row = self.create_parent_customer_row(
+                                current_parent, str(self.customer_id),
+                                sub_customers,
+                                parent_totals['current'], parent_totals['1_30'], parent_totals['31_60'],
+                                parent_totals['61_90'], parent_totals['91_over'], parent_totals['total']
+                            )
+                            customers.append(parent_row)
+                            self.customer_id += 1
+                            print(f"[AR-PARSER] Completed parent customer: {current_parent}")
+                            current_parent = None
+                            sub_customers = []
+                            parent_totals = {'current': 0.0, '1_30': 0.0, '31_60': 0.0, '61_90': 0.0, '91_over': 0.0, 'total': 0.0}
+                        continue
+                    
+                    # Extract amounts from line (up to 6 decimal numbers)
+                    amounts = re.findall(r'[\d,]+\.\d{2}', line)
+                    
+                    # Remove amounts from line to get customer name
+                    customer_line = line
+                    for amt in amounts:
+                        customer_line = customer_line.replace(amt, '', 1)
+                    customer_name = customer_line.strip()
+                    
+                    # Parse amounts based on count
+                    if len(amounts) == 6:
+                        # Full row: current, 1-30, 31-60, 61-90, 91+, total
+                        current = self.parse_amount(amounts[0])
+                        days_1_30 = self.parse_amount(amounts[1])
+                        days_31_60 = self.parse_amount(amounts[2])
+                        days_61_90 = self.parse_amount(amounts[3])
+                        days_91_over = self.parse_amount(amounts[4])
+                        total = self.parse_amount(amounts[5])
+                    elif len(amounts) == 2:
+                        # Only one bucket + total (e.g., "91 and over" + total)
+                        current = 0.0
+                        days_1_30 = 0.0
+                        days_31_60 = 0.0
+                        days_61_90 = 0.0
+                        days_91_over = self.parse_amount(amounts[0])
+                        total = self.parse_amount(amounts[1])
+                    elif len(amounts) == 1:
+                        # Just total
+                        current = 0.0
+                        days_1_30 = 0.0
+                        days_31_60 = 0.0
+                        days_61_90 = 0.0
+                        days_91_over = 0.0
+                        total = self.parse_amount(amounts[0])
+                    else:
+                        # Skip lines without amounts or with unusual patterns
+                        if amounts:
+                            print(f"[AR-PARSER] Skipping line with {len(amounts)} amounts: {line[:50]}")
+                        continue
+                    
+                    # Check if this might be a parent customer (indented sub-customer follows)
+                    # For now, treat lines with total == 0 as potential parents
+                    if total == 0.0 and not amounts:
+                        # No amounts - likely a parent header
+                        if current_parent and sub_customers:
+                            parent_row = self.create_parent_customer_row(
+                                current_parent, str(self.customer_id),
+                                sub_customers,
+                                parent_totals['current'], parent_totals['1_30'], parent_totals['31_60'],
+                                parent_totals['61_90'], parent_totals['91_over'], parent_totals['total']
+                            )
+                            customers.append(parent_row)
+                            self.customer_id += 1
+                            sub_customers = []
+                            parent_totals = {'current': 0.0, '1_30': 0.0, '31_60': 0.0, '61_90': 0.0, '91_over': 0.0, 'total': 0.0}
                         
-                        if header_row_idx == -1:
-                            continue
+                        current_parent = customer_name
+                        print(f"[AR-PARSER] Starting parent customer: {customer_name}")
+                        continue
+                    
+                    # Check if this is a sub-customer (line starts with space in original)
+                    is_sub = line[0] == ' ' if line else False
+                    
+                    if current_parent or is_sub:
+                        # This is a sub-customer
+                        sub_row = self.create_sub_customer_row(
+                            customer_name, str(self.customer_id),
+                            current, days_1_30, days_31_60, days_61_90, days_91_over, total
+                        )
+                        sub_customers.append(sub_row)
+                        self.customer_id += 1
                         
-                        for row in table[header_row_idx + 1:]:
-                            if not row or not row[0]:
-                                continue
-                            
-                            customer_name = str(row[0]).strip()
-                            
-                            if customer_name.upper() == 'TOTAL':
-                                totals['current'] = self.parse_amount(str(row[1] if len(row) > 1 else '0'))
-                                totals['1_30'] = self.parse_amount(str(row[2] if len(row) > 2 else '0'))
-                                totals['31_60'] = self.parse_amount(str(row[3] if len(row) > 3 else '0'))
-                                totals['61_90'] = self.parse_amount(str(row[4] if len(row) > 4 else '0'))
-                                totals['91_over'] = self.parse_amount(str(row[5] if len(row) > 5 else '0'))
-                                totals['total'] = self.parse_amount(str(row[6] if len(row) > 6 else '0'))
-                                break
-                            
-                            if customer_name.startswith('Total for '):
-                                if current_parent and sub_customers:
-                                    parent_row = self.create_parent_customer_row(
-                                        current_parent, str(self.customer_id),
-                                        sub_customers,
-                                        parent_totals['current'], parent_totals['1_30'], parent_totals['31_60'],
-                                        parent_totals['61_90'], parent_totals['91_over'], parent_totals['total']
-                                    )
-                                    customers.append(parent_row)
-                                    self.customer_id += 1
-                                    current_parent = None
-                                    sub_customers = []
-                                    parent_totals = {'current': 0.0, '1_30': 0.0, '31_60': 0.0, '61_90': 0.0, '91_over': 0.0, 'total': 0.0}
-                                continue
-                            
-                            current = self.parse_amount(str(row[1] if len(row) > 1 else '0'))
-                            days_1_30 = self.parse_amount(str(row[2] if len(row) > 2 else '0'))
-                            days_31_60 = self.parse_amount(str(row[3] if len(row) > 3 else '0'))
-                            days_61_90 = self.parse_amount(str(row[4] if len(row) > 4 else '0'))
-                            days_91_over = self.parse_amount(str(row[5] if len(row) > 5 else '0'))
-                            total = self.parse_amount(str(row[6] if len(row) > 6 else '0'))
-                            
-                            if current == 0 and days_1_30 == 0 and days_31_60 == 0 and days_61_90 == 0 and days_91_over == 0 and total == 0:
-                                if current_parent and sub_customers:
-                                    parent_row = self.create_parent_customer_row(
-                                        current_parent, str(self.customer_id),
-                                        sub_customers,
-                                        parent_totals['current'], parent_totals['1_30'], parent_totals['31_60'],
-                                        parent_totals['61_90'], parent_totals['91_over'], parent_totals['total']
-                                    )
-                                    customers.append(parent_row)
-                                    self.customer_id += 1
-                                    sub_customers = []
-                                    parent_totals = {'current': 0.0, '1_30': 0.0, '31_60': 0.0, '61_90': 0.0, '91_over': 0.0, 'total': 0.0}
-                                
-                                current_parent = customer_name
-                                continue
-                            
-                            if current_parent:
-                                sub_row = self.create_sub_customer_row(
-                                    customer_name, str(self.customer_id),
-                                    current, days_1_30, days_31_60, days_61_90, days_91_over, total
-                                )
-                                sub_customers.append(sub_row)
-                                self.customer_id += 1
-                                
-                                parent_totals['current'] += current
-                                parent_totals['1_30'] += days_1_30
-                                parent_totals['31_60'] += days_31_60
-                                parent_totals['61_90'] += days_61_90
-                                parent_totals['91_over'] += days_91_over
-                                parent_totals['total'] += total
-                            else:
-                                customer_row = self.create_customer_row(
-                                    customer_name, str(self.customer_id),
-                                    current, days_1_30, days_31_60, days_61_90, days_91_over, total
-                                )
-                                customers.append(customer_row)
-                                self.customer_id += 1
+                        parent_totals['current'] += current
+                        parent_totals['1_30'] += days_1_30
+                        parent_totals['31_60'] += days_31_60
+                        parent_totals['61_90'] += days_61_90
+                        parent_totals['91_over'] += days_91_over
+                        parent_totals['total'] += total
+                        print(f"[AR-PARSER] Added sub-customer: {customer_name} (${total})")
+                    else:
+                        # Regular customer
+                        customer_row = self.create_customer_row(
+                            customer_name, str(self.customer_id),
+                            current, days_1_30, days_31_60, days_61_90, days_91_over, total
+                        )
+                        customers.append(customer_row)
+                        self.customer_id += 1
+                        print(f"[AR-PARSER] Added customer: {customer_name} (${total})")
         
+        # Handle unfinished parent
         if current_parent and sub_customers:
             parent_row = self.create_parent_customer_row(
                 current_parent, str(self.customer_id),
@@ -615,6 +676,9 @@ class AccountsReceivableConverter:
             customers.append(parent_row)
             self.customer_id += 1
         
+        print(f"[AR-PARSER] Parsed {len(customers)} customer rows")
+        
+        # Add grand total row
         total_row = self.create_total_row(
             totals['current'], totals['1_30'], totals['31_60'],
             totals['61_90'], totals['91_over'], totals['total']
