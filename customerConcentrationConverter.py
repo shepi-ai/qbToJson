@@ -158,6 +158,10 @@ class CustomerConcentrationConverter:
             if customer_name.upper() == 'CUSTOMER':
                 continue
             
+            # Skip report title/company name rows
+            if 'Sandbox Company' in customer_name or 'Sales by Customer' in customer_name:
+                continue
+            
             # Skip date range rows (e.g., "January 1-December 31, 2025")
             if any(month in customer_name for month in ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']):
                 continue
