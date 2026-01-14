@@ -212,9 +212,6 @@ class JournalEntriesConverter:
     
     def parse_pdf(self, file_path):
         """Parse PDF format journal entries - QuickBooks Journal report format"""
-        import logging
-        logger = logging.getLogger(__name__)
-        
         all_text = []
         
         with pdfplumber.open(file_path) as pdf:
@@ -226,14 +223,14 @@ class JournalEntriesConverter:
         full_text = '\n'.join(all_text)
         lines = full_text.split('\n')
         
-        logger.info(f"PDF has {len(lines)} lines total")
+        print(f"[JOURNAL-PARSER] PDF has {len(lines)} lines total")
         
         # Find header line
         start_idx = 0
         for i, line in enumerate(lines):
             if 'TRANSACTION DATE' in line.upper():
                 start_idx = i + 1
-                logger.info(f"Found header at line {i}, starting parse at line {start_idx}")
+                print(f"[JOURNAL-PARSER] Found header at line {i}, starting parse at line {start_idx}")
                 break
         
         # Process data
@@ -401,9 +398,9 @@ class JournalEntriesConverter:
         if current_transaction and current_transaction.get('lines'):
             self.transactions.append(current_transaction)
         
-        logger.info(f"Parsed {len(self.transactions)} transactions from PDF")
+        print(f"[JOURNAL-PARSER] Parsed {len(self.transactions)} transactions from PDF")
         result = self.build_json_structure()
-        logger.info(f"Built {len(result)} journal entries")
+        print(f"[JOURNAL-PARSER] Built {len(result)} journal entries")
         return result
     
     def lookup_account_id(self, account_name):
