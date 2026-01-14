@@ -322,51 +322,100 @@ class AccountsPayableConverter:
         }
         vendor_id = 1
         
+        print("[AP-PARSER] Starting PDF parse")
+        
         with pdfplumber.open(filepath) as pdf:
             for page in pdf.pages:
-                # Try table extraction first
-                tables = page.extract_tables()
-                if tables:
-                    for table in tables:
-                        # Find header row
-                        header_row_idx = -1
-                        for i, row in enumerate(table):
-                            if row and any(cell and 'Vendor' in str(cell) for cell in row):
-                                header_row_idx = i
-                                break
-                        
-                        if header_row_idx == -1:
-                            continue
-                        
-                        # Process data rows
-                        for row in table[header_row_idx + 1:]:
-                            if not row or not row[0]:
-                                continue
-                            
-                            vendor_name = str(row[0]).strip()
-                            
-                            if vendor_name.upper() == 'TOTAL':
-                                totals['current'] = self.parse_amount(str(row[1] if len(row) > 1 else '0'))
-                                totals['1_30'] = self.parse_amount(str(row[2] if len(row) > 2 else '0'))
-                                totals['31_60'] = self.parse_amount(str(row[3] if len(row) > 3 else '0'))
-                                totals['61_90'] = self.parse_amount(str(row[4] if len(row) > 4 else '0'))
-                                totals['91_over'] = self.parse_amount(str(row[5] if len(row) > 5 else '0'))
-                                totals['total'] = self.parse_amount(str(row[6] if len(row) > 6 else '0'))
-                                break
-                            
-                            current = self.parse_amount(str(row[1] if len(row) > 1 else '0'))
-                            days_1_30 = self.parse_amount(str(row[2] if len(row) > 2 else '0'))
-                            days_31_60 = self.parse_amount(str(row[3] if len(row) > 3 else '0'))
-                            days_61_90 = self.parse_amount(str(row[4] if len(row) > 4 else '0'))
-                            days_91_over = self.parse_amount(str(row[5] if len(row) > 5 else '0'))
-                            total = self.parse_amount(str(row[6] if len(row) > 6 else '0'))
-                            
-                            vendor_row = self.create_vendor_row(
-                                vendor_name, str(vendor_id),
-                                current, days_1_30, days_31_60, days_61_90, days_91_over, total
-                            )
-                            vendors.append(vendor_row)
-                            vendor_id += 1
+                # Extract text instead of tables (AP PDFs don't have table structure)
+                text = page.extract_text()
+                if not text:
+                    continue
+                
+                lines = text.split('\n')
+                print(f"[AP-PARSER] Page has {len(lines)} lines")
+                
+                # Find header row
+                header_idx = -1
+                for i, line in enumerate(lines):
+                    if 'VENDOR' in line.upper() and ('CURRENT' in line.upper() or 'TOTAL' in line.upper()):
+                        header_idx = i
+                        print(f"[AP-PARSER] Found header at line {i}")
+                        break
+                
+                if header_idx == -1:
+                    continue
+                
+                # Parse data lines
+                for line in lines[header_idx + 1:]:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    # Check for TOTAL line
+                    if line.upper().startswith('TOTAL'):
+                        # Extract amounts from end of line
+                        amounts = re.findall(r'[\d,]+\.\d{2}', line)
+                        if len(amounts) >= 6:
+                            totals['current'] = self.parse_amount(amounts[0])
+                            totals['1_30'] = self.parse_amount(amounts[1])
+                            totals['31_60'] = self.parse_amount(amounts[2])
+                            totals['61_90'] = self.parse_amount(amounts[3])
+                            totals['91_over'] = self.parse_amount(amounts[4])
+                            totals['total'] = self.parse_amount(amounts[5])
+                        print(f"[AP-PARSER] Found TOTAL row: {totals}")
+                        break
+                    
+                    # Extract amounts from line (up to 6 decimal numbers)
+                    amounts = re.findall(r'[\d,]+\.\d{2}', line)
+                    
+                    if not amounts:
+                        continue
+                    
+                    # Remove amounts from line to get vendor name
+                    vendor_line = line
+                    for amt in amounts:
+                        vendor_line = vendor_line.replace(amt, '', 1)
+                    vendor_name = vendor_line.strip()
+                    
+                    # Parse amounts based on count
+                    if len(amounts) == 6:
+                        # Full row: current, 1-30, 31-50, 51-60, 61-90, 91+, total
+                        current = self.parse_amount(amounts[0])
+                        days_1_30 = self.parse_amount(amounts[1])
+                        days_31_60 = self.parse_amount(amounts[2])
+                        days_61_90 = self.parse_amount(amounts[3])
+                        days_91_over = self.parse_amount(amounts[4])
+                        total = self.parse_amount(amounts[5])
+                    elif len(amounts) == 1:
+                        # Just one bucket + total (most common in AP aging)
+                        current = 0.0
+                        days_1_30 = 0.0
+                        days_31_60 = 0.0
+                        days_61_90 = 0.0
+                        days_91_over = 0.0
+                        total = self.parse_amount(amounts[0])
+                    elif len(amounts) == 2:
+                        # One bucket + total
+                        current = 0.0
+                        days_1_30 = self.parse_amount(amounts[0])
+                        days_31_60 = 0.0
+                        days_61_90 = 0.0
+                        days_91_over = 0.0
+                        total = self.parse_amount(amounts[1])
+                    else:
+                        # Skip unusual patterns
+                        print(f"[AP-PARSER] Skipping line with {len(amounts)} amounts: {line[:50]}")
+                        continue
+                    
+                    vendor_row = self.create_vendor_row(
+                        vendor_name, str(vendor_id),
+                        current, days_1_30, days_31_60, days_61_90, days_91_over, total
+                    )
+                    vendors.append(vendor_row)
+                    vendor_id += 1
+                    print(f"[AP-PARSER] Added vendor: {vendor_name} (${total})")
+        
+        print(f"[AP-PARSER] Parsed {len(vendors)} vendor rows")
         
         total_row = self.create_total_row(
             totals['current'], totals['1_30'], totals['31_60'],
