@@ -158,6 +158,10 @@ class CustomerConcentrationConverter:
             if customer_name.upper() == 'CUSTOMER':
                 continue
             
+            # Skip date range rows (e.g., "January 1-December 31, 2025")
+            if any(month in customer_name for month in ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']):
+                continue
+            
             if customer_name.upper() == 'TOTAL':
                 break
             
@@ -279,13 +283,14 @@ class CustomerConcentrationConverter:
                     
                     total = self.parse_amount(amounts[-1])  # Last amount is the total
                     
-                    # If we're in a parent context AND line is indented, it's a sub-customer
-                    if current_parent and is_indented:
+                    # If we're in a parent context, this is a sub-customer
+                    # (addresses like "0969 Ocean View Road" may not be indented but follow parent)
+                    if current_parent:
                         # Sub-customer - add to parent's total (don't create separate entry)
                         customer_map[current_parent]['revenue'] += total
                         print(f"[CUSTOMER-CONC-PARSER] Added sub-customer to '{current_parent}': {customer_name} (${total})")
                     else:
-                        # Regular customer (or we're not in a parent context)
+                        # Regular customer (not in parent context)
                         if customer_name and customer_name not in customer_map:
                             customer_map[customer_name] = {
                                 'customerName': customer_name,
