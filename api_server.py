@@ -662,6 +662,8 @@ def convert_journal_entries():
         if not is_valid:
             return jsonify({"error": error_msg}), 400
         
+        print(f"[JOURNAL-ENTRIES] Processing file: {file.filename}")
+        
         with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp_file:
             file.save(tmp_file.name)
             tmp_path = Path(tmp_file.name)
@@ -669,12 +671,19 @@ def convert_journal_entries():
         try:
             converter = JournalEntriesConverter()
             result = converter.convert_file(tmp_path)
+            print(f"[JOURNAL-ENTRIES] Converter returned {len(result) if result else 0} entries")
+            print(f"[JOURNAL-ENTRIES] Result type: {type(result)}")
+            if result and len(result) > 0:
+                print(f"[JOURNAL-ENTRIES] First entry: {result[0].get('id', 'NO_ID')}")
             return jsonify({"success": True, "data": result, "filename": secure_filename(file.filename)})
         finally:
             if tmp_path.exists():
                 tmp_path.unlink()
     except Exception as e:
         app.logger.error(f"Error converting journal entries: {str(e)}")
+        print(f"[JOURNAL-ENTRIES] ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": "Failed to convert file", "details": str(e)}), 500
 
 @app.route('/api/convert/accounts-payable', methods=['POST'])
