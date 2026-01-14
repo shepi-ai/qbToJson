@@ -154,6 +154,10 @@ class CustomerConcentrationConverter:
             
             customer_name = str(row[col_map.get('Customer', 0)]).strip()
             
+            # Skip header rows that got included as data
+            if customer_name.upper() == 'CUSTOMER':
+                continue
+            
             if customer_name.upper() == 'TOTAL':
                 break
             
@@ -226,6 +230,10 @@ class CustomerConcentrationConverter:
                 
                 # Parse data lines
                 for line in lines[header_idx + 1:]:
+                    # Check if line is indented BEFORE stripping
+                    original_line = line
+                    is_indented = line and line[0] == ' '
+                    
                     line = line.strip()
                     if not line:
                         continue
@@ -253,7 +261,7 @@ class CustomerConcentrationConverter:
                     
                     if not amounts:
                         # No amount - might be a parent customer header
-                        if not line.startswith(' '):  # Not indented
+                        if not is_indented:  # Not indented
                             current_parent = line.strip()
                             customer_map[current_parent] = {
                                 'customerName': current_parent,
@@ -271,15 +279,13 @@ class CustomerConcentrationConverter:
                     
                     total = self.parse_amount(amounts[-1])  # Last amount is the total
                     
-                    # Check if this is a sub-customer (indented)
-                    is_sub = line[0] == ' ' if line else False
-                    
-                    if current_parent and (is_sub or customer_name.startswith(' ')):
-                        # Sub-customer - add to parent's total
+                    # If we're in a parent context AND line is indented, it's a sub-customer
+                    if current_parent and is_indented:
+                        # Sub-customer - add to parent's total (don't create separate entry)
                         customer_map[current_parent]['revenue'] += total
                         print(f"[CUSTOMER-CONC-PARSER] Added sub-customer to '{current_parent}': {customer_name} (${total})")
                     else:
-                        # Regular customer
+                        # Regular customer (or we're not in a parent context)
                         if customer_name and customer_name not in customer_map:
                             customer_map[customer_name] = {
                                 'customerName': customer_name,
