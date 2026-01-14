@@ -128,7 +128,8 @@ class CustomerConcentrationConverter:
         customers = []
         customer_map = {}
         
-        workbook = openpyxl.load_workbook(filepath)
+        # Use data_only=True to evaluate formulas and return calculated values
+        workbook = openpyxl.load_workbook(filepath, data_only=True)
         sheet = workbook.active
         
         # Find header row
