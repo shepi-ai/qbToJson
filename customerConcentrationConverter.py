@@ -195,65 +195,100 @@ class CustomerConcentrationConverter:
         if not PDF_SUPPORT:
             raise ImportError("pdfplumber is required for PDF support. Install with: pip install pdfplumber")
         
+        import re
         customers = []
         customer_map = {}
         
+        print("[CUSTOMER-CONC-PARSER] Starting PDF parse")
+        
         with pdfplumber.open(filepath) as pdf:
             for page in pdf.pages:
-                # Try table extraction first
-                tables = page.extract_tables()
-                if tables:
-                    for table in tables:
-                        # Find header row
-                        header_row_idx = -1
-                        for i, row in enumerate(table):
-                            if row and any(cell and 'Customer' in str(cell) for cell in row):
-                                header_row_idx = i
-                                break
-                        
-                        if header_row_idx == -1:
-                            continue
-                        
+                # Extract text instead of tables
+                text = page.extract_text()
+                if not text:
+                    continue
+                
+                lines = text.split('\n')
+                print(f"[CUSTOMER-CONC-PARSER] Page has {len(lines)} lines")
+                
+                # Find header row
+                header_idx = -1
+                for i, line in enumerate(lines):
+                    if 'CUSTOMER' in line.upper() and 'TOTAL' in line.upper():
+                        header_idx = i
+                        print(f"[CUSTOMER-CONC-PARSER] Found header at line {i}")
+                        break
+                
+                if header_idx == -1:
+                    continue
+                
+                current_parent = None
+                
+                # Parse data lines
+                for line in lines[header_idx + 1:]:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    # Check for TOTAL line (marks end of data)
+                    if line.upper().startswith('TOTAL') and not line.startswith('Total for'):
+                        print(f"[CUSTOMER-CONC-PARSER] Found TOTAL line, stopping parse")
+                        break
+                    
+                    # Check for "Total for" line (parent customer total)
+                    if line.startswith('Total for '):
+                        parent_name = line.replace('Total for ', '').split()[0:3]  # Get first few words
+                        parent_name = ' '.join(parent_name)
+                        # Extract amount
+                        amounts = re.findall(r'[\d,]+\.\d{2}', line)
+                        if amounts and parent_name in customer_map:
+                            total = self.parse_amount(amounts[-1])
+                            customer_map[parent_name]['revenue'] = total
+                            print(f"[CUSTOMER-CONC-PARSER] Updated parent '{parent_name}' total: ${total}")
                         current_parent = None
-                        
-                        # Process data rows
-                        for row in table[header_row_idx + 1:]:
-                            if not row or not row[0]:
-                                continue
-                            
-                            customer_name = str(row[0]).strip()
-                            
-                            if customer_name.upper() == 'TOTAL':
-                                break
-                            
-                            if customer_name.startswith('Total for '):
-                                parent_name = customer_name.replace('Total for ', '')
-                                if parent_name in customer_map:
-                                    total = self.parse_amount(str(row[1] if len(row) > 1 else '0'))
-                                    customer_map[parent_name]['revenue'] = total
-                                current_parent = None
-                                continue
-                            
-                            total = self.parse_amount(str(row[1] if len(row) > 1 else '0'))
-                            
-                            if total == 0.0:
-                                current_parent = customer_name
-                                customer_map[customer_name] = {
-                                    'customerName': customer_name,
-                                    'revenue': 0.0,
-                                    'percentage': 0.0
-                                }
-                                continue
-                            
-                            if current_parent and current_parent in customer_map:
-                                customer_map[current_parent]['revenue'] += total
-                            else:
-                                if customer_name not in customer_map:
-                                    customer_map[customer_name] = {
-                                        'customerName': customer_name,
-                                        'revenue': total,
-                                        'percentage': 0.0
-                                    }
+                        continue
+                    
+                    # Extract amount from end of line
+                    amounts = re.findall(r'-?[\d,]+\.\d{2}', line)  # Allow negative amounts
+                    
+                    if not amounts:
+                        # No amount - might be a parent customer header
+                        if not line.startswith(' '):  # Not indented
+                            current_parent = line.strip()
+                            customer_map[current_parent] = {
+                                'customerName': current_parent,
+                                'revenue': 0.0,
+                                'percentage': 0.0
+                            }
+                            print(f"[CUSTOMER-CONC-PARSER] Starting parent customer: {current_parent}")
+                        continue
+                    
+                    # Get customer name (everything before the amount)
+                    customer_line = line
+                    for amt in amounts:
+                        customer_line = customer_line.replace(amt, '', 1)
+                    customer_name = customer_line.strip()
+                    
+                    total = self.parse_amount(amounts[-1])  # Last amount is the total
+                    
+                    # Check if this is a sub-customer (indented)
+                    is_sub = line[0] == ' ' if line else False
+                    
+                    if current_parent and (is_sub or customer_name.startswith(' ')):
+                        # Sub-customer - add to parent's total
+                        customer_map[current_parent]['revenue'] += total
+                        print(f"[CUSTOMER-CONC-PARSER] Added sub-customer to '{current_parent}': {customer_name} (${total})")
+                    else:
+                        # Regular customer
+                        if customer_name and customer_name not in customer_map:
+                            customer_map[customer_name] = {
+                                'customerName': customer_name,
+                                'revenue': total,
+                                'percentage': 0.0
+                            }
+                            print(f"[CUSTOMER-CONC-PARSER] Added customer: {customer_name} (${total})")
+        
+        print(f"[CUSTOMER-CONC-PARSER] Parsed {len(customer_map)} customers")
         
         customers = list(customer_map.values())
         
