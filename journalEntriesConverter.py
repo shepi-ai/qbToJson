@@ -237,6 +237,11 @@ class JournalEntriesConverter:
         current_transaction = None
         current_id = None
         
+        # Debug: show first 10 lines after header
+        print(f"[JOURNAL-PARSER] First 10 lines after header:")
+        for i in range(start_idx, min(start_idx + 10, len(lines))):
+            print(f"[JOURNAL-PARSER]   Line {i}: '{lines[i]}'")
+        
         for i in range(start_idx, len(lines)):
             line_orig = lines[i]
             line = line_orig.strip()
@@ -255,6 +260,7 @@ class JournalEntriesConverter:
             
             # Check if this is a transaction ID line (just a number at start of line)
             if line.isdigit() and len(line) <= 4:
+                print(f"[JOURNAL-PARSER] Found transaction ID: {line}")
                 if current_transaction and current_transaction.get('lines'):
                     self.transactions.append(current_transaction)
                 current_id = line
