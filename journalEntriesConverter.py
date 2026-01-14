@@ -211,7 +211,7 @@ class JournalEntriesConverter:
         return self.build_json_structure()
     
     def parse_pdf(self, file_path):
-        """Parse PDF format journal entries - QuickBooks Journal report format"""
+        """Parse PDF format journal entries - pdfplumber single-space format"""
         all_text = []
         
         with pdfplumber.open(file_path) as pdf:
@@ -237,28 +237,23 @@ class JournalEntriesConverter:
         current_transaction = None
         current_id = None
         
-        # Debug: show first 10 lines after header
-        print(f"[JOURNAL-PARSER] First 10 lines after header:")
-        for i in range(start_idx, min(start_idx + 10, len(lines))):
-            print(f"[JOURNAL-PARSER]   Line {i}: '{lines[i]}'")
-        
         for i in range(start_idx, len(lines)):
-            line_orig = lines[i]
-            line = line_orig.strip()
+            line = lines[i].strip()
             
             # Skip empty lines and page footers/headers
-            if not line or 'Accrual Basis' in line or 'Journal' in line and len(line) < 50:
+            if not line or 'Accrual Basis' in line or ('Journal' in line and len(line) < 50):
                 continue
             
             # Check for "Total for" line - marks end of transaction
             if line.startswith('Total for'):
                 if current_transaction and current_transaction.get('lines'):
                     self.transactions.append(current_transaction)
+                    print(f"[JOURNAL-PARSER] Completed transaction {current_transaction['id']} with {len(current_transaction['lines'])} lines")
                 current_transaction = None
                 current_id = None
                 continue
             
-            # Check if this is a transaction ID line (just a number at start of line)
+            # Check if this is a transaction ID line (just a number)
             if line.isdigit() and len(line) <= 4:
                 print(f"[JOURNAL-PARSER] Found transaction ID: {line}")
                 if current_transaction and current_transaction.get('lines'):
@@ -270,135 +265,78 @@ class JournalEntriesConverter:
                 }
                 continue
             
-            # Parse transaction detail line
+            # Parse transaction detail line (pdfplumber single-space format)
             if current_transaction:
-                # Use 2+ spaces as delimiter (QuickBooks PDFs use spacing to separate columns)
-                parts = re.split(r'\s{2,}', line)
-                
-                # Filter out empty parts
-                parts = [p.strip() for p in parts if p.strip()]
-                
-                if len(parts) < 2:
+                # Extract amounts from end of line (1 or 2 decimal numbers)
+                amounts = re.findall(r'[\d,]+\.\d{2}', line)
+                if not amounts:
                     continue
                 
-                # Check for date at start (transaction header line)
-                date_match = re.match(r'^(\d{2}/\d{2}/\d{4})$', parts[0])
+                # Remove amounts from line
+                line_without_amounts = line
+                for amt in amounts:
+                    line_without_amounts = line_without_amounts.rsplit(amt, 1)[0].strip()
+                
+                # Check for date at start
+                date_match = re.match(r'^(\d{2}/\d{2}/\d{4})\s+(.+)$', line_without_amounts)
                 
                 if date_match:
-                    # This is a main transaction line with date
+                    # Line with date
                     date_str = date_match.group(1)
+                    rest = date_match.group(2).strip()
                     
-                    # Set transaction header info if not set
+                    # Set transaction header if not set
                     if not current_transaction.get('date'):
                         current_transaction['date'] = date_str
-                        if len(parts) > 1:
-                            current_transaction['type'] = parts[1]
-                        if len(parts) > 2 and parts[2].isdigit():
-                            current_transaction['num'] = parts[2]
-                        if len(parts) > 3 and not parts[3].replace(',', '').replace('.', '').isdigit():
-                            current_transaction['name'] = parts[3]
+                        parts = rest.split()
+                        current_transaction['type'] = parts[0] if len(parts) > 0 else ''
+                        if len(parts) > 1 and parts[1].isdigit():
+                            current_transaction['num'] = parts[1]
+                        # Name is everything after type/num until account
+                        if len(parts) > 2:
+                            current_transaction['name'] = ' '.join(parts[2:] if not parts[1].isdigit() else parts[2:])
                     
-                    # Extract account and amounts from this line
-                    # Format: DATE TYPE NUM NAME MEMO ACCOUNT DEBIT CREDIT
-                    # Last 1 or 2 items are amounts, item before that is account
-                    debit = 0.0
-                    credit = 0.0
-                    account = ''
-                    memo = ''
+                    # Account is the text before amounts (typically last 3-5 words)
+                    account_words = rest.split()[-5:]
+                    account = ' '.join(account_words)
                     
-                    # Check last two parts for amounts
-                    if len(parts) >= 2:
-                        # Try to parse last part as amount
-                        last_part = parts[-1].replace(',', '')
-                        if re.match(r'^\d+\.?\d*$', last_part):
-                            # Last part is an amount - could be debit or credit
-                            # Check if second-to-last is also an amount
-                            if len(parts) >= 3:
-                                second_last = parts[-2].replace(',', '')
-                                if re.match(r'^\d+\.?\d*$', second_last):
-                                    # Both are amounts: debit and credit
-                                    debit = float(parts[-2].replace(',', ''))
-                                    credit = float(parts[-1].replace(',', ''))
-                                    # Everything before last 2 items (after date/type/num/name)
-                                    if len(parts) > 6:
-                                        memo_account_parts = parts[4:-2]
-                                    elif len(parts) > 4:
-                                        memo_account_parts = parts[4:-2]
-                                    else:
-                                        memo_account_parts = []
-                                    
-                                    # Last part before amounts is account, rest is memo
-                                    if memo_account_parts:
-                                        account = memo_account_parts[-1]
-                                        if len(memo_account_parts) > 1:
-                                            memo = ' '.join(memo_account_parts[:-1])
-                                else:
-                                    # Only last part is amount - it's a credit
-                                    credit = float(parts[-1].replace(',', ''))
-                                    # Second-to-last is account
-                                    account = parts[-2]
-                                    if len(parts) > 5:
-                                        memo = ' '.join(parts[4:-2])
-                            else:
-                                # Single amount
-                                credit = float(parts[-1].replace(',', ''))
-                                if len(parts) > 1:
-                                    account = parts[-2] if len(parts) > 1 else ''
+                    # Parse amounts
+                    if len(amounts) == 2:
+                        debit = float(amounts[0].replace(',', ''))
+                        credit = float(amounts[1].replace(',', ''))
+                    else:
+                        debit = 0.0
+                        credit = float(amounts[0].replace(',', ''))
                     
                     if account and (debit > 0 or credit > 0):
-                        line_item = {
+                        current_transaction['lines'].append({
                             'account': account,
-                            'description': memo,
+                            'description': '',
                             'debit': debit,
                             'credit': credit
-                        }
-                        current_transaction['lines'].append(line_item)
+                        })
                 
                 else:
-                    # This is a continuation line (no date) - indented transaction detail
-                    # Format: spaces + TYPE NUM NAME MEMO ACCOUNT DEBIT CREDIT
-                    # Or just: spaces + MEMO ACCOUNT DEBIT CREDIT
+                    # Continuation line (no date)
+                    # Account is text before amounts
+                    words = line_without_amounts.split()
+                    account = ' '.join(words[-3:]) if len(words) >= 3 else line_without_amounts
                     
-                    debit = 0.0
-                    credit = 0.0
-                    account = ''
-                    memo = ''
-                    
-                    # Check last two parts for amounts
-                    if len(parts) >= 2:
-                        last_part = parts[-1].replace(',', '')
-                        if re.match(r'^\d+\.?\d*$', last_part):
-                            # Last part is an amount
-                            if len(parts) >= 3:
-                                second_last = parts[-2].replace(',', '')
-                                if re.match(r'^\d+\.?\d*$', second_last):
-                                    # Both are amounts
-                                    debit = float(parts[-2].replace(',', ''))
-                                    credit = float(parts[-1].replace(',', ''))
-                                    # Everything before amounts
-                                    if len(parts) > 2:
-                                        memo_account_parts = parts[:-2]
-                                        account = memo_account_parts[-1]
-                                        if len(memo_account_parts) > 1:
-                                            memo = ' '.join(memo_account_parts[:-1])
-                                else:
-                                    # Only last is amount (credit)
-                                    credit = float(parts[-1].replace(',', ''))
-                                    account = parts[-2]
-                                    if len(parts) > 2:
-                                        memo = ' '.join(parts[:-2])
-                            else:
-                                credit = float(parts[-1].replace(',', ''))
-                                account = parts[0] if len(parts) > 0 else ''
+                    # Parse amounts
+                    if len(amounts) == 2:
+                        debit = float(amounts[0].replace(',', ''))
+                        credit = float(amounts[1].replace(',', ''))
+                    else:
+                        debit = 0.0
+                        credit = float(amounts[0].replace(',', ''))
                     
                     if account and (debit > 0 or credit > 0):
-                        line_item = {
+                        current_transaction['lines'].append({
                             'account': account,
-                            'description': memo,
+                            'description': '',
                             'debit': debit,
                             'credit': credit
-                        }
-                        current_transaction['lines'].append(line_item)
+                        })
         
         # Don't forget the last transaction
         if current_transaction and current_transaction.get('lines'):
