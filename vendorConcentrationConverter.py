@@ -200,6 +200,10 @@ class VendorConcentrationConverter:
                         vendor_line = vendor_line.replace(amt, '', 1)
                     vendor_name = vendor_line.strip()
                     
+                    # Skip empty vendor names (subtotals or formatting lines)
+                    if not vendor_name:
+                        continue
+                    
                     total = self.parse_amount(amounts[-1])  # Last amount is the total
                     
                     vendors.append({
