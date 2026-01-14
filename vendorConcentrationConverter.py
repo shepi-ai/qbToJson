@@ -96,7 +96,8 @@ class VendorConcentrationConverter:
         
         vendors = []
         
-        workbook = openpyxl.load_workbook(filepath)
+        # Use data_only=True to evaluate formulas and return calculated values
+        workbook = openpyxl.load_workbook(filepath, data_only=True)
         sheet = workbook.active
         
         # Find header row
@@ -120,6 +121,18 @@ class VendorConcentrationConverter:
             
             vendor_name = str(row[col_map.get('Vendor', 0)]).strip()
             
+            # Skip header rows that got included as data
+            if vendor_name.upper() == 'VENDOR':
+                continue
+            
+            # Skip report title/company name rows
+            if 'Sandbox Company' in vendor_name or 'Expenses by Vendor' in vendor_name:
+                continue
+            
+            # Skip date range rows (e.g., "January 1-December 21, 2025")
+            if any(month in vendor_name for month in ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']):
+                continue
+            
             if vendor_name.upper() == 'TOTAL':
                 break
             
@@ -138,41 +151,65 @@ class VendorConcentrationConverter:
         if not PDF_SUPPORT:
             raise ImportError("pdfplumber is required for PDF support. Install with: pip install pdfplumber")
         
+        import re
         vendors = []
+        
+        print("[VENDOR-CONC-PARSER] Starting PDF parse")
         
         with pdfplumber.open(filepath) as pdf:
             for page in pdf.pages:
-                # Try table extraction first
-                tables = page.extract_tables()
-                if tables:
-                    for table in tables:
-                        # Find header row
-                        header_row_idx = -1
-                        for i, row in enumerate(table):
-                            if row and any(cell and 'Vendor' in str(cell) for cell in row):
-                                header_row_idx = i
-                                break
-                        
-                        if header_row_idx == -1:
-                            continue
-                        
-                        # Process data rows
-                        for row in table[header_row_idx + 1:]:
-                            if not row or not row[0]:
-                                continue
-                            
-                            vendor_name = str(row[0]).strip()
-                            
-                            if vendor_name.upper() == 'TOTAL':
-                                break
-                            
-                            total = self.parse_amount(str(row[1] if len(row) > 1 else '0'))
-                            
-                            vendors.append({
-                                'vendorName': vendor_name,
-                                'payments': total,
-                                'percentage': 0.0
-                            })
+                # Extract text instead of tables
+                text = page.extract_text()
+                if not text:
+                    continue
+                
+                lines = text.split('\n')
+                print(f"[VENDOR-CONC-PARSER] Page has {len(lines)} lines")
+                
+                # Find header row
+                header_idx = -1
+                for i, line in enumerate(lines):
+                    if 'VENDOR' in line.upper() and 'TOTAL' in line.upper():
+                        header_idx = i
+                        print(f"[VENDOR-CONC-PARSER] Found header at line {i}")
+                        break
+                
+                if header_idx == -1:
+                    continue
+                
+                # Parse data lines
+                for line in lines[header_idx + 1:]:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    # Check for TOTAL line (marks end of data)
+                    if line.upper().startswith('TOTAL'):
+                        print(f"[VENDOR-CONC-PARSER] Found TOTAL line, stopping parse")
+                        break
+                    
+                    # Extract amount from end of line
+                    amounts = re.findall(r'-?[\d,]+\.\d{2}', line)
+                    
+                    if not amounts:
+                        continue
+                    
+                    # Get vendor name (everything before the amount)
+                    vendor_line = line
+                    for amt in amounts:
+                        vendor_line = vendor_line.replace(amt, '', 1)
+                    vendor_name = vendor_line.strip()
+                    
+                    total = self.parse_amount(amounts[-1])  # Last amount is the total
+                    
+                    vendors.append({
+                        'vendorName': vendor_name,
+                        'payments': total,
+                        'percentage': 0.0
+                    })
+                    print(f"[VENDOR-CONC-PARSER] Added vendor: {vendor_name} (${total})")
+        
+        print(f"[VENDOR-CONC-PARSER] Parsed {len(vendors)} vendors")
         
         return self.calculate_percentages(vendors)
     
