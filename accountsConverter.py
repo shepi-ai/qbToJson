@@ -45,7 +45,19 @@ class AccountsConverter:
     def get_classification_from_type(self, type_str: str) -> str:
         """Determine classification based on type string"""
         type_lower = type_str.lower()
-        if 'equity' in type_lower:
+        # Specific account types first (before generic pattern matches)
+        if 'accounts payable' in type_lower or type_lower == 'a/p':
+            return 'LIABILITY'
+        elif 'accounts receivable' in type_lower or type_lower == 'a/r':
+            return 'ASSET'
+        elif type_lower == 'bank' or type_lower == 'checking' or type_lower == 'savings':
+            return 'ASSET'
+        elif 'credit card' in type_lower:
+            return 'LIABILITY'
+        elif 'cost of goods sold' in type_lower or type_lower == 'cogs':
+            return 'EXPENSE'
+        # Generic pattern matches
+        elif 'equity' in type_lower:
             return 'EQUITY'
         elif 'expense' in type_lower:
             return 'EXPENSE'
@@ -61,7 +73,19 @@ class AccountsConverter:
     def get_account_type_from_type(self, type_str: str) -> str:
         """Determine account type based on type string"""
         type_lower = type_str.lower()
-        if 'equity' in type_lower:
+        # Specific account types first (before generic pattern matches)
+        if 'accounts payable' in type_lower or type_lower == 'a/p':
+            return 'ACCOUNTS_PAYABLE'
+        elif 'accounts receivable' in type_lower or type_lower == 'a/r':
+            return 'ACCOUNTS_RECEIVABLE'
+        elif type_lower == 'bank' or type_lower == 'checking' or type_lower == 'savings':
+            return 'BANK'
+        elif 'credit card' in type_lower:
+            return 'CREDIT_CARD'
+        elif 'cost of goods sold' in type_lower or type_lower == 'cogs':
+            return 'COST_OF_GOODS_SOLD'
+        # Generic pattern matches
+        elif 'equity' in type_lower:
             return 'EQUITY'
         elif 'other expense' in type_lower:
             return 'OTHER_EXPENSE'
@@ -77,6 +101,8 @@ class AccountsConverter:
             return 'FIXED_ASSET'
         elif 'asset' in type_lower:
             return 'OTHER_CURRENT_ASSET'
+        elif 'other current liabilit' in type_lower:
+            return 'OTHER_CURRENT_LIABILITY'
         elif 'current liabilit' in type_lower:
             return 'CURRENT_LIABILITY'
         elif 'long term liabilit' in type_lower:
@@ -161,36 +187,87 @@ class AccountsConverter:
         accounts = []
         
         with open(filepath, 'r', encoding='utf-8') as f:
-            # Skip header lines
-            for _ in range(3):  # Skip first 3 lines based on sample
-                f.readline()
+            # Read all lines first to detect format
+            all_lines = f.readlines()
             
-            reader = csv.DictReader(f)
-            for row in reader:
-                # Skip empty rows, total row, or metadata rows
-                full_name = row.get('Full name', '')
-                if not full_name or full_name == 'TOTAL':
-                    continue
+        print(f"[CSV Parser] Total lines in file: {len(all_lines)}")
+        
+        # Find the header row (contains 'Full name' or 'Name')
+        header_line_idx = -1
+        for idx, line in enumerate(all_lines):
+            line_lower = line.lower()
+            if 'full name' in line_lower or ('name' in line_lower and 'type' in line_lower):
+                header_line_idx = idx
+                print(f"[CSV Parser] Found header at line {idx}: {line.strip()}")
+                break
+        
+        if header_line_idx == -1:
+            print(f"[CSV Parser] WARNING: No header row found. First 5 lines:")
+            for i, line in enumerate(all_lines[:5]):
+                print(f"  Line {i}: {line.strip()}")
+            return accounts
+        
+        # Parse CSV starting from header
+        from io import StringIO
+        csv_content = ''.join(all_lines[header_line_idx:])
+        reader = csv.DictReader(StringIO(csv_content))
+        
+        print(f"[CSV Parser] Column headers: {reader.fieldnames}")
+        
+        row_count = 0
+        skipped_count = 0
+        
+        for row in reader:
+            row_count += 1
+            
+            # Try different column name variations
+            full_name = (row.get('Full name') or row.get('Name') or 
+                        row.get('FULL NAME') or row.get('NAME') or '').strip()
+            
+            if not full_name:
+                skipped_count += 1
+                print(f"[CSV Parser] Skipping row {row_count}: empty name")
+                continue
                 
-                # Skip rows that look like report metadata (contain dates/times)
-                if any(keyword in full_name.lower() for keyword in ['basis', 'gmtz', 'accrual', 'cash']):
-                    continue
-                
-                # Parse balance
-                balance_str = row.get('Total balance', '0').replace('$', '').replace(',', '')
-                try:
-                    balance = float(balance_str) if balance_str else 0.0
-                except ValueError:
-                    balance = 0.0
-                
-                account = self.create_account_object(
-                    name=row['Full name'],
-                    type_str=row.get('Type', ''),
-                    detail_type=row.get('Detail type', ''),
-                    description=row.get('Description'),
-                    balance=balance
-                )
-                accounts.append(account)
+            if full_name == 'TOTAL':
+                skipped_count += 1
+                print(f"[CSV Parser] Skipping row {row_count}: TOTAL row")
+                continue
+            
+            # Skip rows that look like report metadata
+            if any(keyword in full_name.lower() for keyword in ['basis', 'gmtz', 'accrual', 'cash']):
+                skipped_count += 1
+                print(f"[CSV Parser] Skipping row {row_count}: metadata keyword in '{full_name}'")
+                continue
+            
+            # Get type and detail type with fallbacks
+            type_str = (row.get('Type') or row.get('TYPE') or 
+                       row.get('Account Type') or '').strip()
+            detail_type = (row.get('Detail type') or row.get('Detail Type') or 
+                          row.get('DETAIL TYPE') or row.get('Sub Type') or '').strip()
+            description = (row.get('Description') or row.get('DESCRIPTION') or '').strip()
+            
+            # Parse balance with fallbacks
+            balance_str = (row.get('Total balance') or row.get('Balance') or 
+                          row.get('TOTAL BALANCE') or row.get('Current Balance') or '0')
+            balance_str = str(balance_str).replace('$', '').replace(',', '').strip()
+            try:
+                balance = float(balance_str) if balance_str else 0.0
+            except ValueError:
+                balance = 0.0
+            
+            print(f"[CSV Parser] Processing account: name='{full_name}', type='{type_str}', detail_type='{detail_type}'")
+            
+            account = self.create_account_object(
+                name=full_name,
+                type_str=type_str,
+                detail_type=detail_type or 'Other',  # Default if missing
+                description=description,
+                balance=balance
+            )
+            accounts.append(account)
+        
+        print(f"[CSV Parser] Processed {row_count} rows, created {len(accounts)} accounts, skipped {skipped_count} rows")
         
         return accounts
     

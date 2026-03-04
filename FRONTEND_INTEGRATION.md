@@ -18,7 +18,7 @@ Complete guide for integrating the Document Converter API into your frontend app
 ### Basic File Upload
 
 ```javascript
-async function convertDocument(file, documentType) {
+async function convertDocument(file, documentType, apiKey) {
   const formData = new FormData();
   formData.append('file', file);
   
@@ -27,6 +27,9 @@ async function convertDocument(file, documentType) {
       `https://qbtojson-7lqwugl3xa-uc.a.run.app/api/convert/${documentType}`,
       {
         method: 'POST',
+        headers: {
+          'x-api-key': apiKey  // REQUIRED: API key authentication
+        },
         body: formData
       }
     );
@@ -51,14 +54,20 @@ async function convertDocument(file, documentType) {
 // Usage
 const fileInput = document.getElementById('fileInput');
 const file = fileInput.files[0];
-const data = await convertDocument(file, 'trial-balance');
+const apiKey = 'YOUR_API_KEY';  // Store securely, don't hardcode in production
+const data = await convertDocument(file, 'trial-balance', apiKey);
 console.log('Converted data:', data);
 ```
+
+**⚠️ Security Note:** Never expose your API key in client-side code in production. Instead:
+- Store API key in environment variables
+- Make requests through your backend
+- Or use a secure token exchange mechanism
 
 ### With Database Save
 
 ```javascript
-async function convertAndSave(file, documentType, projectId) {
+async function convertAndSave(file, documentType, projectId, apiKey) {
   const formData = new FormData();
   formData.append('file', file);
   formData.append('save_to_db', 'true');
@@ -68,6 +77,9 @@ async function convertAndSave(file, documentType, projectId) {
     `https://qbtojson-7lqwugl3xa-uc.a.run.app/api/convert/${documentType}`,
     {
       method: 'POST',
+      headers: {
+        'x-api-key': apiKey
+      },
       body: formData
     }
   );
@@ -85,13 +97,14 @@ async function convertAndSave(file, documentType, projectId) {
 ### Storage-Based Conversion
 
 ```javascript
-async function convertFromStorage(filePath, projectId, documentType) {
+async function convertFromStorage(filePath, projectId, documentType, apiKey) {
   const response = await fetch(
     `https://qbtojson-7lqwugl3xa-uc.a.run.app/api/convert-from-storage/${documentType}`,
     {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey
       },
       body: JSON.stringify({
         file_path: filePath,
@@ -138,20 +151,49 @@ async function batchConvert(files, documentType) {
 // Usage with file input
 const fileInput = document.getElementById('multiFileInput');
 const files = Array.from(fileInput.files);
-const result = await batchConvert(files, 'trial-balance');
+const apiKey = 'YOUR_API_KEY';
+const result = await batchConvert(files, 'trial-balance', apiKey);
 console.log(`Processed ${result.files_processed} files`);
+```
+
+### Batch Upload (with API Key)
+
+```javascript
+async function batchConvert(files, documentType, apiKey) {
+  const formData = new FormData();
+  
+  // Append multiple files
+  files.forEach(file => {
+    formData.append('files', file);
+  });
+  
+  const response = await fetch(
+    `https://qbtojson-7lqwugl3xa-uc.a.run.app/api/batch/${documentType}`,
+    {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey
+      },
+      body: formData
+    }
+  );
+  
+  const result = await response.json();
+  return result;
+}
 ```
 
 ### Account Lookup
 
 ```javascript
-async function lookupAccount(accountName) {
+async function lookupAccount(accountName, apiKey) {
   const response = await fetch(
     'https://qbtojson-7lqwugl3xa-uc.a.run.app/api/accounts/lookup',
     {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey
       },
       body: JSON.stringify({ name: accountName })
     }
@@ -171,6 +213,47 @@ const account = await lookupAccount('Cash');
 if (account) {
   console.log(`Account ID: ${account.id}`);
 }
+```
+
+### General Ledger with Auto-Derive COA
+
+```javascript
+async function uploadGeneralLedgerWithAutoCOA(file, projectId, apiKey) {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('save_to_db', 'true');
+  formData.append('project_id', projectId);
+  
+  const response = await fetch(
+    'https://qbtojson-7lqwugl3xa-uc.a.run.app/api/convert/general-ledger',
+    {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey
+      },
+      body: formData
+    }
+  );
+  
+  const result = await response.json();
+  
+  if (result.success) {
+    console.log('General Ledger processed:', result.data);
+    
+    // Check if COA was auto-derived
+    if (result.coa_derived) {
+      console.log(`✅ Auto-derived ${result.derived_count} accounts from General Ledger`);
+      console.log('⚠️ Please review derived accounts against Balance Sheet and P&L');
+    }
+  }
+  
+  return result;
+}
+
+// Usage
+const glFile = document.getElementById('fileInput').files[0];
+const apiKey = 'YOUR_API_KEY';
+const result = await uploadGeneralLedgerWithAutoCOA(glFile, 'proj_123', apiKey);
 ```
 
 ---

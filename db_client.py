@@ -36,7 +36,8 @@ class DatabaseClient:
                            data_type: str,
                            data: Dict,
                            source_document_id: Optional[str] = None,
-                           filename: Optional[str] = None) -> bool:
+                           filename: Optional[str] = None,
+                           source_type: str = 'qbtojson') -> bool:
         """
         Save converted data to database
         
@@ -46,6 +47,7 @@ class DatabaseClient:
             data: Converted data dictionary
             source_document_id: Optional source document UUID
             filename: Optional original filename
+            source_type: Source of the data (default: 'qbtojson', can be 'derived_from_gl')
             
         Returns:
             True if successful, False otherwise
@@ -61,7 +63,7 @@ class DatabaseClient:
             # Prepare data for insertion
             insert_data = {
                 'project_id': project_id,
-                'source_type': 'qbtojson',
+                'source_type': source_type,
                 'data_type': data_type,
                 'data': data
             }
@@ -139,6 +141,54 @@ class DatabaseClient:
             logger.warning(f"Could not extract record count: {str(e)}")
         
         return None
+    
+    def check_coa_exists(self, project_id: str) -> bool:
+        """
+        Check if Chart of Accounts exists for project
+        
+        Args:
+            project_id: Supabase project UUID
+            
+        Returns:
+            True if COA exists, False otherwise
+        """
+        if not self.api_key:
+            logger.warning("Cannot check COA: QBTOJSON_API_KEY not configured")
+            return False
+        
+        try:
+            payload = {
+                'action': 'query',
+                'table': 'processed_data',
+                'operation': 'select',
+                'filters': {
+                    'project_id': project_id,
+                    'data_type': 'chart_of_accounts'
+                },
+                'columns': ['id'],
+                'limit': 1
+            }
+            
+            response = requests.post(
+                self.db_proxy_url,
+                headers=self.headers,
+                json=payload,
+                timeout=10
+            )
+            
+            response.raise_for_status()
+            result = response.json()
+            
+            if result.get('success') and result.get('data'):
+                exists = len(result['data']) > 0
+                logger.info(f"COA exists for project {project_id}: {exists}")
+                return exists
+            
+            return False
+        
+        except Exception as e:
+            logger.error(f"Error checking COA existence: {str(e)}")
+            return False  # Assume doesn't exist on error
     
     def is_configured(self) -> bool:
         """Check if database saver is properly configured"""

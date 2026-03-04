@@ -448,16 +448,19 @@ class TrialBalanceConverter:
                 break
         
         # Count month columns with years in remaining rows
+        # Look at all cells in header rows (typically row 4-5) for month-year patterns
         month_year_count = 0
-        for i in range(5, len(rows)):
-            row_text = ' '.join(str(cell) for cell in rows[i] if cell)
-            for month in ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER']:
-                if re.search(rf'{month}\s+\d{{4}}', row_text.upper()):
+        for i in range(4, min(len(rows), 7)):  # Check rows 4-6 (header area)
+            for cell in rows[i]:
+                cell_text = str(cell).upper()
+                # Match patterns like "JAN 2022", "JANUARY 2022", "Jan 2025"
+                if re.search(r'(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+\d{4}', cell_text):
                     month_year_count += 1
-                    break
+        
+        print(f"[DEBUG] Format detection: has_as_of={has_as_of}, month_year_count={month_year_count}", file=sys.stderr)
         
         if has_as_of and month_year_count < 2:
-            print(f"[DEBUG] Detected single-month XLSX format", file=sys.stderr)
+            print(f"[DEBUG] Detected single-month XLSX format (has 'As of' and fewer than 2 month columns)", file=sys.stderr)
             return self.parse_single_month_xlsx(filepath)
         
         # Fall back to multi-month parser
@@ -896,8 +899,8 @@ class TrialBalanceConverter:
         """Build the complete trial balance JSON structure"""
         monthly_reports = []
         
-        # Sort months chronologically
-        sorted_months = sorted(data_by_month.keys())
+        # Sort months chronologically by start_date
+        sorted_months = sorted(data_by_month.keys(), key=lambda k: data_by_month[k]['start_date'])
         
         for month_key in sorted_months:
             month_data = data_by_month[month_key]

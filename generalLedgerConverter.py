@@ -39,21 +39,14 @@ except ImportError:
 class GeneralLedgerConverter:
     """Converts General Ledger documents to QuickBooks-style JSON format"""
     
-    def __init__(self, use_account_lookup: bool = True, api_base_url: str = "http://localhost:8080"):
+    def __init__(self, use_account_lookup: bool = False, api_base_url: str = "http://localhost:8080"):
         self.account_id_counter = 1
-        self.use_account_lookup = use_account_lookup and ACCOUNT_LOOKUP_AVAILABLE
+        # Disable account lookup by default - it causes performance issues
+        self.use_account_lookup = False
         self.account_lookup_client = None
         
-        if self.use_account_lookup:
-            try:
-                self.account_lookup_client = get_account_lookup_client(api_base_url)
-                # Check if API is available
-                if not self.account_lookup_client.is_api_available():
-                    print("Warning: Account lookup API is not available. Using generated IDs.", file=sys.stderr)
-                    self.use_account_lookup = False
-            except Exception as e:
-                print(f"Warning: Could not initialize account lookup client: {e}. Using generated IDs.", file=sys.stderr)
-                self.use_account_lookup = False
+        # Account lookups disabled for performance - generated IDs work fine
+        print("ℹ️  Using generated account IDs (account lookup disabled for performance)", file=sys.stderr)
         
     def get_account_id(self, account_name: str) -> str:
         """Get account ID from lookup service or generate one"""
@@ -72,37 +65,222 @@ class GeneralLedgerConverter:
         self.account_id_counter += 1
         return id_str
     
-    def parse_date_range(self, header_text: str) -> Tuple[str, date, date]:
-        """Parse date range from header text like 'January 1-September 8, 2025'"""
-        # Try to find date range pattern
-        date_pattern = r'(\w+)\s+(\d+)\s*-\s*(\w+)\s+(\d+),?\s*(\d{4})'
-        match = re.search(date_pattern, header_text)
+    def parse_date_range(self, header_text: str) -> Optional[Tuple[str, date, date]]:
+        """
+        Parse date range from header text with multiple pattern support
+        Returns: (period_string, start_date, end_date) or None if no match
+        """
+        import calendar
         
+        # Month name mappings
+        months_full = {
+            'January': 1, 'February': 2, 'March': 3, 'April': 4,
+            'May': 5, 'June': 6, 'July': 7, 'August': 8,
+            'September': 9, 'October': 10, 'November': 11, 'December': 12
+        }
+        months_abbr = {
+            'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
+            'Jul': 7, 'Aug': 8, 'Sep': 9, 'Sept': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12
+        }
+        
+        # Pattern 1: "April 1-30, 2024" (day range within single month)
+        match = re.search(r'(\w+)\s+(\d+)-(\d+),?\s*(\d{4})', header_text, re.IGNORECASE)
         if match:
-            start_month = match.group(1)
+            month_name = match.group(1)
             start_day = int(match.group(2))
-            end_month = match.group(3)
+            end_day = int(match.group(3))
+            year = int(match.group(4))
+            
+            month_num = months_full.get(month_name.capitalize()) or months_abbr.get(month_name.capitalize())
+            if month_num:
+                try:
+                    start_date = date(year, month_num, start_day)
+                    end_date = date(year, month_num, end_day)
+                    period = f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
+                    print(f"📅 Parsed header date (Pattern 1): {period}", file=sys.stderr)
+                    return period, start_date, end_date
+                except ValueError as e:
+                    print(f"⚠️  Date parsing error (Pattern 1): {e}", file=sys.stderr)
+        
+        # Pattern 2: "January 1 - September 8, 2025" (cross-month range)
+        match = re.search(r'(\w+)\s+(\d+)\s*[-–—]\s*(\w+)\s+(\d+),?\s*(\d{4})', header_text, re.IGNORECASE)
+        if match:
+            start_month_name = match.group(1)
+            start_day = int(match.group(2))
+            end_month_name = match.group(3)
             end_day = int(match.group(4))
             year = int(match.group(5))
             
-            # Convert month names to numbers
-            months = {
-                'January': 1, 'February': 2, 'March': 3, 'April': 4,
-                'May': 5, 'June': 6, 'July': 7, 'August': 8,
-                'September': 9, 'October': 10, 'November': 11, 'December': 12
-            }
+            start_month_num = months_full.get(start_month_name.capitalize()) or months_abbr.get(start_month_name.capitalize())
+            end_month_num = months_full.get(end_month_name.capitalize()) or months_abbr.get(end_month_name.capitalize())
             
-            start_month_num = months.get(start_month, 1)
-            end_month_num = months.get(end_month, 9)
-            
-            start_date = date(year, start_month_num, start_day)
-            end_date = date(year, end_month_num, end_day)
-            
-            period = f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
-            return period, start_date, end_date
+            if start_month_num and end_month_num:
+                try:
+                    start_date = date(year, start_month_num, start_day)
+                    end_date = date(year, end_month_num, end_day)
+                    period = f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
+                    print(f"📅 Parsed header date (Pattern 2): {period}", file=sys.stderr)
+                    return period, start_date, end_date
+                except ValueError as e:
+                    print(f"⚠️  Date parsing error (Pattern 2): {e}", file=sys.stderr)
         
-        # Default fallback
-        return "2025-01-01 to 2025-09-08", date(2025, 1, 1), date(2025, 9, 8)
+        # Pattern 3: "01/01/2024 - 01/31/2024" or "1/1/2024 to 12/31/2024" (numeric dates)
+        match = re.search(r'(\d{1,2})/(\d{1,2})/(\d{4})\s*[-–—to]+\s*(\d{1,2})/(\d{1,2})/(\d{4})', header_text, re.IGNORECASE)
+        if match:
+            try:
+                start_date = date(int(match.group(3)), int(match.group(1)), int(match.group(2)))
+                end_date = date(int(match.group(6)), int(match.group(4)), int(match.group(5)))
+                period = f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
+                print(f"📅 Parsed header date (Pattern 3): {period}", file=sys.stderr)
+                return period, start_date, end_date
+            except ValueError as e:
+                print(f"⚠️  Date parsing error (Pattern 3): {e}", file=sys.stderr)
+        
+        # Pattern 4: "January 2024" (full month - infer 1st to last day)
+        match = re.search(r'(?:Period:?\s*)?(\w+)\s+(\d{4})', header_text, re.IGNORECASE)
+        if match:
+            month_name = match.group(1)
+            year = int(match.group(2))
+            
+            month_num = months_full.get(month_name.capitalize()) or months_abbr.get(month_name.capitalize())
+            if month_num:
+                try:
+                    start_date = date(year, month_num, 1)
+                    last_day = calendar.monthrange(year, month_num)[1]
+                    end_date = date(year, month_num, last_day)
+                    period = f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
+                    print(f"📅 Parsed header date (Pattern 4 - full month): {period}", file=sys.stderr)
+                    return period, start_date, end_date
+                except ValueError as e:
+                    print(f"⚠️  Date parsing error (Pattern 4): {e}", file=sys.stderr)
+        
+        # Pattern 5: "2024-01-01 to 2024-01-31" (ISO format)
+        match = re.search(r'(\d{4})-(\d{2})-(\d{2})\s+to\s+(\d{4})-(\d{2})-(\d{2})', header_text, re.IGNORECASE)
+        if match:
+            try:
+                start_date = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+                end_date = date(int(match.group(4)), int(match.group(5)), int(match.group(6)))
+                period = f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
+                print(f"📅 Parsed header date (Pattern 5): {period}", file=sys.stderr)
+                return period, start_date, end_date
+            except ValueError as e:
+                print(f"⚠️  Date parsing error (Pattern 5): {e}", file=sys.stderr)
+        
+        # Pattern 6: "Jan 1, 2024 - Jan 31, 2024" (abbreviated months with comma)
+        match = re.search(r'(\w{3,})\s+(\d+),\s*(\d{4})\s*[-–—]\s*(\w{3,})\s+(\d+),\s*(\d{4})', header_text, re.IGNORECASE)
+        if match:
+            start_month_name = match.group(1)
+            start_day = int(match.group(2))
+            start_year = int(match.group(3))
+            end_month_name = match.group(4)
+            end_day = int(match.group(5))
+            end_year = int(match.group(6))
+            
+            start_month_num = months_full.get(start_month_name.capitalize()) or months_abbr.get(start_month_name.capitalize())
+            end_month_num = months_full.get(end_month_name.capitalize()) or months_abbr.get(end_month_name.capitalize())
+            
+            if start_month_num and end_month_num:
+                try:
+                    start_date = date(start_year, start_month_num, start_day)
+                    end_date = date(end_year, end_month_num, end_day)
+                    period = f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
+                    print(f"📅 Parsed header date (Pattern 6): {period}", file=sys.stderr)
+                    return period, start_date, end_date
+                except ValueError as e:
+                    print(f"⚠️  Date parsing error (Pattern 6): {e}", file=sys.stderr)
+        
+        # No match found - will use transaction dates as fallback
+        print(f"⚠️  No header date pattern matched for: {header_text[:100]}", file=sys.stderr)
+        return None
+    
+    def extract_transaction_date_range(self, accounts_data: Dict[str, Any]) -> Tuple[Optional[date], Optional[date]]:
+        """Extract min/max dates from actual transaction data"""
+        all_dates = []
+        
+        for account_info in accounts_data.values():
+            for transaction in account_info.get('transactions', []):
+                tx_date = transaction.get('date', '').strip()
+                if tx_date:
+                    # Try common date formats
+                    for date_format in ['%m/%d/%Y', '%Y-%m-%d', '%m-%d-%Y']:
+                        try:
+                            parsed = datetime.strptime(tx_date, date_format).date()
+                            all_dates.append(parsed)
+                            break
+                        except ValueError:
+                            continue
+        
+        if all_dates:
+            return min(all_dates), max(all_dates)
+        
+        # Return None if no dates found
+        return None, None
+    
+    def validate_date_ranges(self, header_dates: Optional[Tuple], transaction_dates: Tuple[Optional[date], Optional[date]]) -> Dict[str, Any]:
+        """Compare header vs transaction dates and determine which to use"""
+        warnings = []
+        use_transaction_dates = False
+        
+        tx_start, tx_end = transaction_dates
+        
+        # If no transaction dates found, we have a problem
+        if tx_start is None or tx_end is None:
+            if header_dates:
+                return {
+                    'use_transaction_dates': False,
+                    'warnings': ['No transaction dates found, using header dates'],
+                    'start_date': header_dates[1],
+                    'end_date': header_dates[2]
+                }
+            else:
+                # Fallback to current year Jan 1
+                return {
+                    'use_transaction_dates': False,
+                    'warnings': ['No dates found in header or transactions, using fallback'],
+                    'start_date': date.today().replace(month=1, day=1),
+                    'end_date': date.today()
+                }
+        
+        # If no header dates, use transaction dates
+        if header_dates is None:
+            return {
+                'use_transaction_dates': True,
+                'warnings': ['No header dates found, using transaction date range'],
+                'start_date': tx_start,
+                'end_date': tx_end
+            }
+        
+        header_start, header_end = header_dates[1], header_dates[2]
+        
+        # Check if header dates are suspiciously wide (more than 9 months)
+        if (header_end - header_start).days > 274:  # 9 months
+            warnings.append(f"Header date range unusually wide: {header_start} to {header_end} ({(header_end - header_start).days} days)")
+            use_transaction_dates = True
+        
+        # Check if transaction dates differ significantly from header (more than 30 days)
+        if abs((tx_start - header_start).days) > 30:
+            warnings.append(f"Transaction start date ({tx_start}) differs significantly from header ({header_start})")
+            use_transaction_dates = True
+        
+        if abs((tx_end - header_end).days) > 30:
+            warnings.append(f"Transaction end date ({tx_end}) differs significantly from header ({header_end})")
+            use_transaction_dates = True
+        
+        # Determine which dates to use
+        if use_transaction_dates:
+            return {
+                'use_transaction_dates': True,
+                'warnings': warnings,
+                'start_date': tx_start,
+                'end_date': tx_end
+            }
+        else:
+            return {
+                'use_transaction_dates': False,
+                'warnings': warnings if warnings else ['Header dates match transaction dates'],
+                'start_date': header_start,
+                'end_date': header_end
+            }
     
     def create_transaction_row(self, transaction_data: Dict[str, Any]) -> Dict[str, Any]:
         """Create a transaction row object"""
@@ -535,8 +713,25 @@ class GeneralLedgerConverter:
     
     def build_json_structure(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Build the complete general ledger JSON structure"""
-        period_info = data.get('period_info', ("2025-01-01 to 2025-09-08", date(2025, 1, 1), date(2025, 9, 8)))
+        period_info = data.get('period_info')
         accounts_data = data.get('accounts', {})
+        
+        # Extract transaction date range from actual data
+        transaction_dates = self.extract_transaction_date_range(accounts_data)
+        
+        # Validate and determine which dates to use
+        date_validation = self.validate_date_ranges(period_info, transaction_dates)
+        
+        # Log warnings
+        for warning in date_validation['warnings']:
+            print(f"⚠️  GL Date Validation: {warning}", file=sys.stderr)
+        
+        # Use the validated dates
+        start_date = date_validation['start_date']
+        end_date = date_validation['end_date']
+        
+        if date_validation['use_transaction_dates']:
+            print(f"✅ Using transaction dates: {start_date} to {end_date}", file=sys.stderr)
         
         timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000+00:00')
         
@@ -547,8 +742,8 @@ class GeneralLedgerConverter:
                 "reportName": "GeneralLedger",
                 "dateMacro": None,
                 "reportBasis": None,
-                "startPeriod": period_info[1].strftime('%Y-%m-%d'),
-                "endPeriod": period_info[2].strftime('%Y-%m-%d'),
+                "startPeriod": start_date.strftime('%Y-%m-%d'),
+                "endPeriod": end_date.strftime('%Y-%m-%d'),
                 "summarizeColumnsBy": None,
                 "currency": "USD",
                 "customer": None,

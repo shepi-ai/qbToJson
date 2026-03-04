@@ -19,9 +19,47 @@ The Document Converter API is a REST API service that converts financial documen
 
 ## Authentication
 
-Currently, the API does not require authentication. All endpoints are publicly accessible.
+**All API endpoints (except `/health` and `/api/info`) require API key authentication.**
 
-> **Note**: In production, you may want to add API key authentication or other security measures.
+### Required Header
+
+Include the following header in all API requests:
+
+```http
+x-api-key: YOUR_API_KEY
+```
+
+### Example with cURL
+
+```bash
+curl -X POST \
+  -H "x-api-key: YOUR_API_KEY" \
+  -F "file=@TrialBalance.pdf" \
+  https://qbtojson-7lqwugl3xa-uc.a.run.app/api/convert/trial-balance
+```
+
+### Authentication Errors
+
+**401 Unauthorized - Missing API Key:**
+```json
+{
+  "error": "Unauthorized",
+  "details": "API key required. Include 'x-api-key' header."
+}
+```
+
+**401 Unauthorized - Invalid API Key:**
+```json
+{
+  "error": "Unauthorized",
+  "details": "Invalid API key"
+}
+```
+
+### Public Endpoints (No Auth Required)
+
+- `GET /health` - Health check
+- `GET /api/info` - API information
 
 ## Common Headers
 
@@ -362,10 +400,14 @@ curl -X POST \
 
 #### POST /api/convert/general-ledger
 
+**Auto-derives Chart of Accounts**: When you upload a General Ledger with `save_to_db=true`, the system automatically checks if a Chart of Accounts exists for your project. If not, it derives one from the GL transactions and saves it with `source_type='derived_from_gl'`.
+
 **Request:**
 ```bash
 curl -X POST \
   -F "file=@GeneralLedger.csv" \
+  -F "save_to_db=true" \
+  -F "project_id=proj_123" \
   https://qbtojson-7lqwugl3xa-uc.a.run.app/api/convert/general-ledger
 ```
 
@@ -381,9 +423,24 @@ curl -X POST \
     }
   },
   "accounts": 45,
-  "filename": "GeneralLedger.csv"
+  "filename": "GeneralLedger.csv",
+  "saved_to_db": true,
+  "project_id": "proj_123",
+  "coa_derived": true,
+  "derived_count": 30
 }
 ```
+
+**Response Fields:**
+- `coa_derived` (boolean): `true` if a Chart of Accounts was automatically derived from the GL
+- `derived_count` (number): Number of accounts that were derived (only present if `coa_derived` is true)
+
+**How Auto-Derivation Works:**
+1. You upload a General Ledger with `save_to_db=true` and `project_id`
+2. System checks if Chart of Accounts exists for the project
+3. If NO COA exists → System derives COA from GL transactions using pattern matching
+4. Derived COA is saved with `data_type='chart_of_accounts'` and `source_type='derived_from_gl'`
+5. Both GL and derived COA are now available in your project
 
 ---
 

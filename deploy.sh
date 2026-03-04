@@ -7,6 +7,7 @@ set -e  # Exit on error
 # Configuration
 SERVICE_NAME="qbtojson"
 REGION="us-central1"
+GCLOUD="/opt/homebrew/share/google-cloud-sdk/bin/gcloud"
 
 echo "🚀 Deploying qbToJson to Google Cloud Run"
 echo "=========================================="
@@ -16,17 +17,34 @@ echo "Method: Cloud Build (--source)"
 echo ""
 
 # Check if gcloud is installed
-if ! command -v gcloud &> /dev/null; then
-    echo "❌ Error: gcloud CLI not found. Please install Google Cloud SDK."
+if [ ! -f "$GCLOUD" ]; then
+    echo "❌ Error: gcloud CLI not found at $GCLOUD"
+    echo "Please update GCLOUD variable in deploy.sh with the correct path"
     exit 1
 fi
 
 # Check if logged in to gcloud
 echo "📋 Checking gcloud authentication..."
-if ! gcloud auth list --filter=status:ACTIVE --format="value(account)" | grep -q .; then
-    echo "❌ Error: Not authenticated with gcloud. Run: gcloud auth login"
+if ! $GCLOUD auth list --filter=status:ACTIVE --format="value(account)" | grep -q .; then
+    echo "❌ Error: Not authenticated with gcloud. Run: $GCLOUD auth login"
     exit 1
 fi
+
+# Load API key from .env file
+if [ -f .env ]; then
+    export $(grep -v '^#' .env | xargs)
+    echo "✅ Loaded environment variables from .env"
+else
+    echo "⚠️  Warning: .env file not found"
+fi
+
+# Check if QBTOJSON_API_KEY is set
+if [ -z "$QBTOJSON_API_KEY" ]; then
+    echo "❌ Error: QBTOJSON_API_KEY not set in .env file"
+    exit 1
+fi
+
+echo "🔑 API Key loaded (length: ${#QBTOJSON_API_KEY})"
 
 # Deploy to Cloud Run using Cloud Build
 echo ""
@@ -34,15 +52,18 @@ echo "🚀 Deploying to Cloud Run with Cloud Build..."
 echo "   (This will build and deploy automatically)"
 echo ""
 
-gcloud run deploy ${SERVICE_NAME} \
+$GCLOUD run deploy ${SERVICE_NAME} \
   --source . \
   --region ${REGION} \
   --allow-unauthenticated \
-  --memory 1Gi \
-  --cpu 1 \
+  --memory 2Gi \
+  --cpu 2 \
+  --concurrency 1 \
+  --cpu-boost \
   --timeout 300s \
-  --max-instances 10 \
-  --min-instances 0
+  --max-instances 50 \
+  --min-instances 0 \
+  --set-env-vars QBTOJSON_API_KEY="${QBTOJSON_API_KEY}"
 
 if [ $? -ne 0 ]; then
     echo "❌ Cloud Run deployment failed!"
@@ -53,7 +74,7 @@ fi
 echo ""
 echo "✅ Deployment successful!"
 echo ""
-SERVICE_URL=$(gcloud run services describe ${SERVICE_NAME} --region ${REGION} --format 'value(status.url)')
+SERVICE_URL=$($GCLOUD run services describe ${SERVICE_NAME} --region ${REGION} --format 'value(status.url)')
 echo "🌐 Service URL: ${SERVICE_URL}"
 echo ""
 echo "📋 Test the service:"
