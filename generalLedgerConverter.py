@@ -197,25 +197,52 @@ class GeneralLedgerConverter(BaseConverter):
         """Compare header vs transaction dates and determine which to use"""
         warnings = []
         use_transaction_dates = False
+        today = date.today()
 
         tx_start, tx_end = transaction_dates
 
         # If no transaction dates found, we have a problem
         if tx_start is None or tx_end is None:
             if header_dates:
+                # Validate header dates before trusting them
+                header_start, header_end = header_dates[1], header_dates[2]
+                
+                # RED FLAG: end date is today (likely a parsing fallback - reject)
+                if header_end == today:
+                    print(f"❌ Header end date equals today ({today}), likely a parsing fallback - REJECTING", file=sys.stderr)
+                    return {
+                        'use_transaction_dates': False,
+                        'warnings': [f'Header end date equals today ({today}), likely invalid - both header and transaction parsing failed'],
+                        'start_date': None,
+                        'end_date': None
+                    }
+                
+                # RED FLAG: start >= end (invalid range)
+                if header_start >= header_end:
+                    print(f"❌ Invalid date range: start ({header_start}) >= end ({header_end}) - REJECTING", file=sys.stderr)
+                    return {
+                        'use_transaction_dates': False,
+                        'warnings': [f'Invalid date range: start ({header_start}) >= end ({header_end})'],
+                        'start_date': None,
+                        'end_date': None
+                    }
+                
+                # Header dates look valid
+                print(f"✅ Using header dates: {header_start} to {header_end} (no transaction dates found)", file=sys.stderr)
                 return {
                     'use_transaction_dates': False,
                     'warnings': ['No transaction dates found, using header dates'],
-                    'start_date': header_dates[1],
-                    'end_date': header_dates[2]
+                    'start_date': header_start,
+                    'end_date': header_end
                 }
             else:
-                # Fallback to current year Jan 1
+                # DO NOT fall back to today's date - return None instead
+                print("❌ CRITICAL: Could not determine dates from header or transactions", file=sys.stderr)
                 return {
                     'use_transaction_dates': False,
-                    'warnings': ['No dates found in header or transactions, using fallback'],
-                    'start_date': date.today().replace(month=1, day=1),
-                    'end_date': date.today()
+                    'warnings': ['Could not determine dates - both header parsing and transaction scan failed'],
+                    'start_date': None,
+                    'end_date': None
                 }
 
         # If no header dates, use transaction dates
@@ -704,6 +731,20 @@ class GeneralLedgerConverter(BaseConverter):
         # Use the validated dates
         start_date = date_validation['start_date']
         end_date = date_validation['end_date']
+
+        # If dates are None, we have a critical issue - fail fast
+        if start_date is None or end_date is None:
+            print("❌ CRITICAL: Could not determine valid date range for General Ledger", file=sys.stderr)
+            for warning in date_validation['warnings']:
+                print(f"  - {warning}", file=sys.stderr)
+            
+            # Raise an error - better to fail than return wrong data
+            raise ValueError(
+                "Could not determine valid date range for General Ledger. "
+                "Both header parsing and transaction date extraction failed. "
+                "Please check that the file has a date range in the header (e.g., 'January 1, 2025-December 31, 2025') "
+                "and/or contains transaction records with valid dates."
+            )
 
         if date_validation['use_transaction_dates']:
             print(f"✅ Using transaction dates: {start_date} to {end_date}", file=sys.stderr)
