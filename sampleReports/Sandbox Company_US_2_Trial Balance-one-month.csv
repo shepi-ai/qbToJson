@@ -1,0 +1,46 @@
+Trial Balance,,
+Sandbox Company_US_2,,
+"As of January 31, 2023",,
+
+Full name,Debit,Credit
+Savings,"460,692.48",
+Checking,"143,851.32",
+Accounts Receivable (A/R),,"39,463.38"
+Undeposited Funds,"76,488.38",
+Accounts Payable (A/P),,"8,553.43"
+Retained Earnings,,"629,205.48"
+Billable Expense Income,,657.87
+Design income,,"1,875.00"
+Landscaping Services,,840.00
+Landscaping Services:Job Materials,,"2,293.04"
+Landscaping Services:Job Materials:Fountains and Garden Lighting,,"2,521.75"
+Landscaping Services:Job Materials:Plants and Soil,,100.00
+Landscaping Services:Labor:Installation,,"5,631.57"
+Landscaping Services:Labor:Maintenance and Repair,0.00,
+Other Income,0.00,
+Pest Control Services,,735.00
+Services,0.00,
+Unapplied Cash Payment Income,,"1,979.18"
+Automobile,296.23,
+Automobile:Fuel,565.18,
+Insurance:Workers Compensation,"2,054.49",
+Job Expenses,46.42,
+Job Expenses:Equipment Rental,,257.90
+Job Expenses:Permits,120.55,
+Legal & Professional Fees:Accounting,"1,205.19",
+Legal & Professional Fees:Bookkeeper,708.20,
+Maintenance and Repair,"1,787.92",
+Meals and Entertainment,549.79,
+Promotional,201.05,
+Rent or Lease,849.28,
+Taxes & Licenses,"1,732.88",
+Uncategorized Expense,"1,049.85",
+Utilities,501.96,
+Utilities:Telephone,40.40,
+Depreciation,645.16,
+Miscellaneous,726.87,
+TOTAL,"$694,113.60","$694,113.60"
+
+
+
+"Accrual Basis Wednesday, March 04, 2026 05:44 PM GMTZ",,

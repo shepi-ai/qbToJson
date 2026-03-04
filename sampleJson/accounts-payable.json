@@ -1,1 +1,428 @@
-{"header":{"time":"2025-12-22T14:14:21.000+00:00","reportName":"AgedPayables","dateMacro":"today","reportBasis":null,"startPeriod":"2025-12-22","endPeriod":"2025-12-22","summarizeColumnsBy":"Total","currency":"USD","customer":null,"vendor":null,"employee":null,"item":null,"clazz":null,"department":null,"option":[{"name":"report_date","value":"2025-12-22"},{"name":"NoReportData","value":"false"}]},"columns":{"column":[{"colTitle":"","colType":"Vendor","metaData":[],"columns":null},{"colTitle":"Current","colType":"Money","metaData":[{"name":"ColKey","value":"current"}],"columns":null},{"colTitle":"1 - 30","colType":"Money","metaData":[{"name":"ColKey","value":"0"}],"columns":null},{"colTitle":"31 - 60","colType":"Money","metaData":[{"name":"ColKey","value":"1"}],"columns":null},{"colTitle":"61 - 90","colType":"Money","metaData":[{"name":"ColKey","value":"2"}],"columns":null},{"colTitle":"91 and over","colType":"Money","metaData":[{"name":"ColKey","value":"3"}],"columns":null},{"colTitle":"Total","colType":"Money","metaData":[{"name":"ColKey","value":"total"}],"columns":null}]},"rows":{"row":[{"id":null,"parentId":null,"header":null,"rows":null,"summary":null,"colData":[{"attributes":null,"value":"Brosnahan Insurance Agency","id":"31","href":null},{"attributes":null,"value":"","id":null,"href":null},{"attributes":null,"value":"","id":null,"href":null},{"attributes":null,"value":"","id":null,"href":null},{"attributes":null,"value":"","id":null,"href":null},{"attributes":null,"value":"241.23","id":null,"href":null},{"attributes":null,"value":"241.23","id":null,"href":null}],"type":null,"group":null},{"id":null,"parentId":null,"header":null,"rows":null,"summary":null,"colData":[{"attributes":null,"value":"Diego's Road Warrior Bodyshop","id":"36","href":null},{"attributes":null,"value":"","id":null,"href":null},{"attributes":null,"value":"","id":null,"href":null},{"attributes":null,"value":"","id":null,"href":null},{"attributes":null,"value":"","id":null,"href":null},{"attributes":null,"value":"755.00","id":null,"href":null},{"attributes":null,"value":"755.00","id":null,"href":null}],"type":null,"group":null},{"id":null,"parentId":null,"header":null,"rows":null,"summary":null,"colData":[{"attributes":null,"value":"Norton Lumber and Building Materials","id":"46","href":null},{"attributes":null,"value":"","id":null,"href":null},{"attributes":null,"value":"","id":null,"href":null},{"attributes":null,"value":"","id":null,"href":null},{"attributes":null,"value":"","id":null,"href":null},{"attributes":null,"value":"205.00","id":null,"href":null},{"attributes":null,"value":"205.00","id":null,"href":null}],"type":null,"group":null},{"id":null,"parentId":null,"header":null,"rows":null,"summary":null,"colData":[{"attributes":null,"value":"PG&E","id":"48","href":null},{"attributes":null,"value":"","id":null,"href":null},{"attributes":null,"value":"","id":null,"href":null},{"attributes":null,"value":"","id":null,"href":null},{"attributes":null,"value":"","id":null,"href":null},{"attributes":null,"value":"86.44","id":null,"href":null},{"attributes":null,"value":"86.44","id":null,"href":null}],"type":null,"group":null},{"id":null,"parentId":null,"header":null,"rows":null,"summary":null,"colData":[{"attributes":null,"value":"Robertson & Associates","id":"49","href":null},{"attributes":null,"value":"","id":null,"href":null},{"attributes":null,"value":"","id":null,"href":null},{"attributes":null,"value":"","id":null,"href":null},{"attributes":null,"value":"","id":null,"href":null},{"attributes":null,"value":"315.00","id":null,"href":null},{"attributes":null,"value":"315.00","id":null,"href":null}],"type":null,"group":null},{"id":null,"parentId":null,"header":null,"rows":null,"summary":{"colData":[{"attributes":null,"value":"TOTAL","id":null,"href":null},{"attributes":null,"value":"0.00","id":null,"href":null},{"attributes":null,"value":"0.00","id":null,"href":null},{"attributes":null,"value":"0.00","id":null,"href":null},{"attributes":null,"value":"0.00","id":null,"href":null},{"attributes":null,"value":"1602.67","id":null,"href":null},{"attributes":null,"value":"1602.67","id":null,"href":null}]},"colData":[],"type":"SECTION","group":"GrandTotal"}]}}
+{
+  "header": {
+    "time": "2026-03-04T21:09:16.000+00:00",
+    "reportName": "AgedPayables",
+    "dateMacro": "today",
+    "reportBasis": null,
+    "startPeriod": "2026-03-04",
+    "endPeriod": "2026-03-04",
+    "summarizeColumnsBy": "Total",
+    "currency": "USD",
+    "customer": null,
+    "vendor": null,
+    "employee": null,
+    "item": null,
+    "clazz": null,
+    "department": null,
+    "option": [
+      {
+        "name": "report_date",
+        "value": "2026-03-04"
+      },
+      {
+        "name": "NoReportData",
+        "value": "false"
+      }
+    ]
+  },
+  "columns": {
+    "column": [
+      {
+        "colTitle": "",
+        "colType": "Vendor",
+        "metaData": [],
+        "columns": null
+      },
+      {
+        "colTitle": "Current",
+        "colType": "Money",
+        "metaData": [
+          {
+            "name": "ColKey",
+            "value": "current"
+          }
+        ],
+        "columns": null
+      },
+      {
+        "colTitle": "1 - 30",
+        "colType": "Money",
+        "metaData": [
+          {
+            "name": "ColKey",
+            "value": "0"
+          }
+        ],
+        "columns": null
+      },
+      {
+        "colTitle": "31 - 60",
+        "colType": "Money",
+        "metaData": [
+          {
+            "name": "ColKey",
+            "value": "1"
+          }
+        ],
+        "columns": null
+      },
+      {
+        "colTitle": "61 - 90",
+        "colType": "Money",
+        "metaData": [
+          {
+            "name": "ColKey",
+            "value": "2"
+          }
+        ],
+        "columns": null
+      },
+      {
+        "colTitle": "91 and over",
+        "colType": "Money",
+        "metaData": [
+          {
+            "name": "ColKey",
+            "value": "3"
+          }
+        ],
+        "columns": null
+      },
+      {
+        "colTitle": "Total",
+        "colType": "Money",
+        "metaData": [
+          {
+            "name": "ColKey",
+            "value": "total"
+          }
+        ],
+        "columns": null
+      }
+    ]
+  },
+  "rows": {
+    "row": [
+      {
+        "id": null,
+        "parentId": null,
+        "header": null,
+        "rows": null,
+        "summary": null,
+        "colData": [
+          {
+            "attributes": null,
+            "value": "Brosnahan Insurance Agency",
+            "id": "1",
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "241.23",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "241.23",
+            "id": null,
+            "href": null
+          }
+        ],
+        "type": null,
+        "group": null
+      },
+      {
+        "id": null,
+        "parentId": null,
+        "header": null,
+        "rows": null,
+        "summary": null,
+        "colData": [
+          {
+            "attributes": null,
+            "value": "Diego's Road Warrior Bodyshop",
+            "id": "2",
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "755.0",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "755.0",
+            "id": null,
+            "href": null
+          }
+        ],
+        "type": null,
+        "group": null
+      },
+      {
+        "id": null,
+        "parentId": null,
+        "header": null,
+        "rows": null,
+        "summary": null,
+        "colData": [
+          {
+            "attributes": null,
+            "value": "Norton Lumber and Building Materials",
+            "id": "3",
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "205.0",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "205.0",
+            "id": null,
+            "href": null
+          }
+        ],
+        "type": null,
+        "group": null
+      },
+      {
+        "id": null,
+        "parentId": null,
+        "header": null,
+        "rows": null,
+        "summary": null,
+        "colData": [
+          {
+            "attributes": null,
+            "value": "PG&E",
+            "id": "4",
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "86.44",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "86.44",
+            "id": null,
+            "href": null
+          }
+        ],
+        "type": null,
+        "group": null
+      },
+      {
+        "id": null,
+        "parentId": null,
+        "header": null,
+        "rows": null,
+        "summary": null,
+        "colData": [
+          {
+            "attributes": null,
+            "value": "Robertson & Associates",
+            "id": "5",
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "315.0",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "",
+            "id": null,
+            "href": null
+          },
+          {
+            "attributes": null,
+            "value": "315.0",
+            "id": null,
+            "href": null
+          }
+        ],
+        "type": null,
+        "group": null
+      },
+      {
+        "id": null,
+        "parentId": null,
+        "header": null,
+        "rows": null,
+        "summary": {
+          "colData": [
+            {
+              "attributes": null,
+              "value": "TOTAL",
+              "id": null,
+              "href": null
+            },
+            {
+              "attributes": null,
+              "value": "755.0",
+              "id": null,
+              "href": null
+            },
+            {
+              "attributes": null,
+              "value": "761.23",
+              "id": null,
+              "href": null
+            },
+            {
+              "attributes": null,
+              "value": "86.44",
+              "id": null,
+              "href": null
+            },
+            {
+              "attributes": null,
+              "value": "0.0",
+              "id": null,
+              "href": null
+            },
+            {
+              "attributes": null,
+              "value": "0.0",
+              "id": null,
+              "href": null
+            },
+            {
+              "attributes": null,
+              "value": "1602.67",
+              "id": null,
+              "href": null
+            }
+          ]
+        },
+        "colData": [],
+        "type": "SECTION",
+        "group": "GrandTotal"
+      }
+    ]
+  }
+}
