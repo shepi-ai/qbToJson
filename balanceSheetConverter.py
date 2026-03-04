@@ -16,110 +16,23 @@ import re
 from typing import Dict, List, Any, Optional, Tuple
 import calendar
 
-# Import account lookup client
-try:
-    from account_lookup_client import get_account_lookup_client
-    ACCOUNT_LOOKUP_AVAILABLE = True
-except ImportError:
-    ACCOUNT_LOOKUP_AVAILABLE = False
+from base_converter import BaseConverter, XLSX_SUPPORT, PDF_SUPPORT
 
-# Try to import optional dependencies
-try:
+# Conditional imports for type checking in parse methods
+if XLSX_SUPPORT:
     import openpyxl
-    XLSX_SUPPORT = True
-except ImportError:
-    XLSX_SUPPORT = False
 
-try:
+if PDF_SUPPORT:
     import pdfplumber
-    PDF_SUPPORT = True
-except ImportError:
-    PDF_SUPPORT = False
 
 
-class BalanceSheetConverter:
+class BalanceSheetConverter(BaseConverter):
     """Converts Balance Sheet documents to QuickBooks-style JSON format"""
-    
+
     def __init__(self, use_account_lookup: bool = True, api_base_url: str = "http://localhost:8080"):
-        self.account_id_counter = 1
-        self.use_account_lookup = use_account_lookup and ACCOUNT_LOOKUP_AVAILABLE
-        self.account_lookup_client = None
-        
-        if self.use_account_lookup:
-            try:
-                self.account_lookup_client = get_account_lookup_client(api_base_url)
-                # Check if API is available
-                if not self.account_lookup_client.is_api_available():
-                    print("Warning: Account lookup API is not available. Using generated IDs.", file=sys.stderr)
-                    self.use_account_lookup = False
-            except Exception as e:
-                print(f"Warning: Could not initialize account lookup client: {e}. Using generated IDs.", file=sys.stderr)
-                self.use_account_lookup = False
-        
-    def get_account_id(self, account_name: str) -> str:
-        """Get account ID from lookup service or generate one"""
-        if self.use_account_lookup and self.account_lookup_client:
-            # Try to look up the account ID
-            account_id = self.account_lookup_client.lookup_account_id(account_name)
-            if account_id:
-                return account_id
-        
-        # Fallback to generating an ID
-        return self.generate_account_id()
-        
-    def generate_account_id(self) -> str:
-        """Generate a unique account ID"""
-        id_str = str(self.account_id_counter)
-        self.account_id_counter += 1
-        return id_str
-    
-    def parse_month_column(self, column_header: str) -> Tuple[str, date, date]:
-        """Parse month column header to extract month, start and end dates"""
-        # Handle different formats like "January 2025", "Jul 1 - Jul 27 2025"
-        if ' - ' in column_header:
-            # Handle partial month format
-            parts = column_header.split(' - ')
-            end_part = parts[1].strip()
-            # Extract month and year from end part
-            match = re.search(r'(\w+)\s+\d+\s+(\d{4})', end_part)
-            if match:
-                month_name = match.group(1)
-                year = int(match.group(2))
-                month_num = datetime.strptime(month_name[:3], '%b').month
-                # For partial months, use the date range provided
-                start_match = re.search(r'(\w+)\s+(\d+)', parts[0])
-                if start_match:
-                    start_day = int(start_match.group(2))
-                    start_date = date(year, month_num, start_day)
-                else:
-                    start_date = date(year, month_num, 1)
-                
-                end_match = re.search(r'(\w+)\s+(\d+)\s+(\d{4})', parts[1])
-                if end_match:
-                    end_day = int(end_match.group(2))
-                    end_date = date(year, month_num, end_day)
-                else:
-                    end_date = date(year, month_num, calendar.monthrange(year, month_num)[1])
-                
-                month_str = f"{year}-{month_num:02d}"
-                return month_str, start_date, end_date
-        else:
-            # Handle full month format "January 2025"
-            match = re.search(r'(\w+)\s+(\d{4})', column_header)
-            if match:
-                month_name = match.group(1)
-                year = int(match.group(2))
-                month_num = datetime.strptime(month_name, '%B').month
-                month_str = f"{year}-{month_num:02d}"
-                start_date = date(year, month_num, 1)
-                last_day = calendar.monthrange(year, month_num)[1]
-                end_date = date(year, month_num, last_day)
-                return month_str, start_date, end_date
-        
-        # Default fallback
-        return "2025-01", date(2025, 1, 1), date(2025, 1, 31)
-    
-    def create_row_object(self, name: str, value: Optional[str] = None, 
+        super().__init__(use_account_lookup=use_account_lookup, api_base_url=api_base_url)
+
+    def create_row_object(self, name: str, value: Optional[str] = None,
                          account_id: Optional[str] = None, row_type: str = "DATA",
                          group: Optional[str] = None, is_section: bool = False,
                          sub_rows: Optional[List] = None) -> Dict[str, Any]:
@@ -134,7 +47,7 @@ class BalanceSheetConverter:
             "type": row_type if row_type else None,
             "group": group
         }
-        
+
         if is_section:
             # Section header
             row["header"] = {
@@ -154,29 +67,29 @@ class BalanceSheetConverter:
                 {"attributes": None, "value": value if value else "", "id": None, "href": None}
             ]
             row["type"] = "DATA"
-        
+
         return row
-    
+
     def parse_csv_hierarchy(self, filepath: Path) -> Tuple[List[str], Dict[str, Dict[str, Any]]]:
         """Parse CSV file and extract hierarchical balance sheet data"""
         months = []
         data_by_month = {}
-        
+
         with open(filepath, 'r', encoding='utf-8') as f:
             # Use csv reader to handle quoted fields properly
             reader = csv.reader(f)
             rows = list(reader)
-            
+
             # Find the header row with months
             header_row_idx = -1
             for i, row in enumerate(rows):
                 if len(row) > 0 and ('Distribution account' in row[0] or any(month in ' '.join(row) for month in ['January', 'February', 'March'])):
                     header_row_idx = i
                     break
-            
+
             if header_row_idx == -1:
                 raise ValueError("Could not find header row with months")
-            
+
             # Parse header to get months
             header_row = rows[header_row_idx]
             month_columns = []
@@ -191,7 +104,7 @@ class BalanceSheetConverter:
                         'end_date': end_date,
                         'header': part.strip()
                     })
-            
+
             # Initialize data structure for each month
             for month_info in month_columns:
                 data_by_month[month_info['month']] = {
@@ -201,40 +114,40 @@ class BalanceSheetConverter:
                     'liabilities': {},
                     'equity': {}
                 }
-            
+
             # Parse data rows
             current_section = None
             current_subsection = None
             current_group = None
-            
+
             for row in rows[header_row_idx + 1:]:
                 if not row or not row[0] or 'Accrual Basis' in row[0]:
                     continue
-                
+
                 account_name = row[0].strip()
-                
+
                 if not account_name:
                     continue
-                
+
                 # Determine hierarchy level based on account name
                 if account_name in ['Assets', 'Liabilities and Equity']:
                     current_section = account_name.lower().replace(' and ', '_').replace(' ', '_')
                     continue
-                elif account_name in ['Current Assets', 'Fixed Assets', 'Other Assets', 
-                                    'Liabilities', 'Equity', 'Current Liabilities', 
+                elif account_name in ['Current Assets', 'Fixed Assets', 'Other Assets',
+                                    'Liabilities', 'Equity', 'Current Liabilities',
                                     'Long-term Liabilities']:
                     current_subsection = account_name
                     continue
                 elif account_name.startswith('Total for '):
                     # Skip total rows for now, we'll calculate them
                     continue
-                elif any(account_name == cat for cat in ['Bank Accounts', 'Accounts Receivable', 
+                elif any(account_name == cat for cat in ['Bank Accounts', 'Accounts Receivable',
                                                          'Other Current Assets', 'Accounts Payable',
                                                          'Credit Cards', 'Other Current Liabilities',
                                                          'Truck']):
                     current_group = account_name
                     continue
-                
+
                 # This is an actual account line
                 for month_info in month_columns:
                     if month_info['index'] < len(row):
@@ -243,7 +156,7 @@ class BalanceSheetConverter:
                             value = float(value_str) if value_str else 0.0
                         except ValueError:
                             value = 0.0
-                        
+
                         if value != 0.0 or account_name in ['Retained Earnings', 'Net Income']:
                             # Store the account data
                             month = month_info['month']
@@ -256,15 +169,15 @@ class BalanceSheetConverter:
                                     section_data = data_by_month[month]['liabilities']
                             else:
                                 continue
-                            
+
                             if current_subsection not in section_data:
                                 section_data[current_subsection] = {}
                             if current_group and current_group not in section_data[current_subsection]:
                                 section_data[current_subsection][current_group] = {}
-                            
+
                             # Get account ID from lookup or generate one
-                            account_id = self.get_account_id(account_name)
-                            
+                            account_id = self.get_or_create_account_id(account_name)
+
                             if current_group:
                                 section_data[current_subsection][current_group][account_name] = {
                                     'value': value,
@@ -275,23 +188,28 @@ class BalanceSheetConverter:
                                     'value': value,
                                     'id': account_id
                                 }
-        
+
         return months, data_by_month
-    
+
+    def parse_csv(self, filepath: Path) -> List[Dict[str, Any]]:
+        """Parse CSV file and convert to balance sheet JSON"""
+        months, data_by_month = self.parse_csv_hierarchy(filepath)
+        return self.build_balance_sheet_json(months, data_by_month)
+
     def build_balance_sheet_json(self, months: List[str], data_by_month: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Build the complete balance sheet JSON structure"""
         result = []
-        
+
         for month in months:
             month_data = data_by_month[month]
-            
+
             # Check if there's any data for this month
             has_data = any(
-                month_data['assets'] or 
-                month_data['liabilities'] or 
+                month_data['assets'] or
+                month_data['liabilities'] or
                 month_data['equity']
             )
-            
+
             # Create the month object
             month_obj = {
                 "month": month,
@@ -299,15 +217,15 @@ class BalanceSheetConverter:
                 "startDate": month_data['start_date'].strftime('%Y-%m-%d'),
                 "report": self.create_report_structure(month_data, has_data)
             }
-            
+
             result.append(month_obj)
-        
+
         return result
-    
+
     def create_report_structure(self, month_data: Dict[str, Any], has_data: bool) -> Dict[str, Any]:
         """Create the report structure for a single month"""
         timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000+00:00')
-        
+
         report = {
             "header": {
                 "time": timestamp,
@@ -341,7 +259,7 @@ class BalanceSheetConverter:
             },
             "rows": {"row": []}
         }
-        
+
         if has_data:
             # Add the Total column
             report["columns"]["column"].append({
@@ -350,29 +268,29 @@ class BalanceSheetConverter:
                 "metaData": [{"name": "ColKey", "value": "total"}],
                 "columns": None
             })
-            
+
             # Build the rows structure
             rows = []
-            
+
             # ASSETS section
             assets_rows = self.build_assets_section(month_data['assets'])
             if assets_rows:
                 rows.append(assets_rows)
-            
+
             # LIABILITIES AND EQUITY section
             liabilities_equity_rows = self.build_liabilities_equity_section(
-                month_data['liabilities'], 
+                month_data['liabilities'],
                 month_data['equity']
             )
             if liabilities_equity_rows:
                 rows.append(liabilities_equity_rows)
-            
+
             report["rows"]["row"] = rows
         else:
             # No data - create minimal structure
             rows = [
                 self.create_row_object("ASSETS", is_section=True, group="TotalAssets"),
-                self.create_row_object("LIABILITIES AND EQUITY", is_section=True, 
+                self.create_row_object("LIABILITIES AND EQUITY", is_section=True,
                                      group="TotalLiabilitiesAndEquity", sub_rows=[
                     self.create_row_object("Liabilities", is_section=True, group="Liabilities"),
                     self.create_row_object("Equity", is_section=True, group="Equity", sub_rows=[
@@ -382,25 +300,25 @@ class BalanceSheetConverter:
                     self.create_row_object("Total Equity", None, None, group="Equity")
                 ])
             ]
-            
+
             # Add the total row
-            rows.append(self.create_row_object("TOTAL LIABILITIES AND EQUITY", None, None, 
+            rows.append(self.create_row_object("TOTAL LIABILITIES AND EQUITY", None, None,
                                              row_type=None, group="TotalLiabilitiesAndEquity"))
-            
+
             report["rows"]["row"] = rows
-        
+
         return report
-    
+
     def build_assets_section(self, assets_data: Dict[str, Any]) -> Dict[str, Any]:
         """Build the ASSETS section of the balance sheet"""
         assets_rows = []
         total_assets = 0.0
-        
+
         # Current Assets
         if 'Current Assets' in assets_data:
             current_assets_rows = []
             current_assets_total = 0.0
-            
+
             # Bank Accounts
             if 'Bank Accounts' in assets_data['Current Assets']:
                 bank_rows = []
@@ -410,7 +328,7 @@ class BalanceSheetConverter:
                         account, f"{data['value']:.2f}", data['id']
                     ))
                     bank_total += data['value']
-                
+
                 if bank_rows:
                     bank_section = self.create_row_object(
                         "Bank Accounts", is_section=True, sub_rows=bank_rows
@@ -424,7 +342,7 @@ class BalanceSheetConverter:
                     bank_section["group"] = "BankAccounts"
                     current_assets_rows.append(bank_section)
                     current_assets_total += bank_total
-            
+
             # Accounts Receivable
             if 'Accounts Receivable' in assets_data['Current Assets']:
                 ar_rows = []
@@ -434,7 +352,7 @@ class BalanceSheetConverter:
                         account, f"{data['value']:.2f}", data['id']
                     ))
                     ar_total += data['value']
-                
+
                 if ar_rows:
                     ar_section = self.create_row_object(
                         "Accounts Receivable", is_section=True, sub_rows=ar_rows
@@ -448,7 +366,7 @@ class BalanceSheetConverter:
                     ar_section["group"] = "AR"
                     current_assets_rows.append(ar_section)
                     current_assets_total += ar_total
-            
+
             # Other Current Assets
             if 'Other Current Assets' in assets_data['Current Assets']:
                 other_rows = []
@@ -458,7 +376,7 @@ class BalanceSheetConverter:
                         account, f"{data['value']:.2f}", data['id']
                     ))
                     other_total += data['value']
-                
+
                 if other_rows:
                     other_section = self.create_row_object(
                         "Other Current Assets", is_section=True, sub_rows=other_rows
@@ -472,7 +390,7 @@ class BalanceSheetConverter:
                     other_section["group"] = "OtherCurrentAssets"
                     current_assets_rows.append(other_section)
                     current_assets_total += other_total
-            
+
             if current_assets_rows:
                 current_assets_section = self.create_row_object(
                     "Current Assets", is_section=True, sub_rows=current_assets_rows
@@ -486,12 +404,12 @@ class BalanceSheetConverter:
                 current_assets_section["group"] = "CurrentAssets"
                 assets_rows.append(current_assets_section)
                 total_assets += current_assets_total
-        
+
         # Fixed Assets
         if 'Fixed Assets' in assets_data:
             fixed_assets_rows = []
             fixed_assets_total = 0.0
-            
+
             for group_name, group_data in assets_data['Fixed Assets'].items():
                 if isinstance(group_data, dict) and group_name == 'Truck':
                     truck_rows = []
@@ -501,7 +419,7 @@ class BalanceSheetConverter:
                             account, f"{data['value']:.2f}", data['id']
                         ))
                         truck_total += data['value']
-                    
+
                     if truck_rows:
                         truck_section = self.create_row_object(
                             "Truck", is_section=True, sub_rows=truck_rows
@@ -515,7 +433,7 @@ class BalanceSheetConverter:
                         }
                         fixed_assets_rows.append(truck_section)
                         fixed_assets_total += truck_total
-            
+
             if fixed_assets_rows:
                 fixed_assets_section = self.create_row_object(
                     "Fixed Assets", is_section=True, sub_rows=fixed_assets_rows
@@ -529,7 +447,7 @@ class BalanceSheetConverter:
                 fixed_assets_section["group"] = "FixedAssets"
                 assets_rows.append(fixed_assets_section)
                 total_assets += fixed_assets_total
-        
+
         # Create main ASSETS section
         assets_section = self.create_row_object(
             "ASSETS", is_section=True, sub_rows=assets_rows
@@ -541,23 +459,23 @@ class BalanceSheetConverter:
             ]
         }
         assets_section["group"] = "TotalAssets"
-        
+
         return assets_section
-    
-    def build_liabilities_equity_section(self, liabilities_data: Dict[str, Any], 
+
+    def build_liabilities_equity_section(self, liabilities_data: Dict[str, Any],
                                        equity_data: Dict[str, Any]) -> Dict[str, Any]:
         """Build the LIABILITIES AND EQUITY section"""
         le_rows = []
-        
+
         # Liabilities section
         liabilities_rows = []
         total_liabilities = 0.0
-        
+
         # Current Liabilities
         if 'Current Liabilities' in liabilities_data:
             current_liab_rows = []
             current_liab_total = 0.0
-            
+
             # Accounts Payable
             if 'Accounts Payable' in liabilities_data['Current Liabilities']:
                 ap_rows = []
@@ -567,7 +485,7 @@ class BalanceSheetConverter:
                         account, f"{data['value']:.2f}", data['id']
                     ))
                     ap_total += data['value']
-                
+
                 if ap_rows:
                     ap_section = self.create_row_object(
                         "Accounts Payable", is_section=True, sub_rows=ap_rows
@@ -581,7 +499,7 @@ class BalanceSheetConverter:
                     ap_section["group"] = "AP"
                     current_liab_rows.append(ap_section)
                     current_liab_total += ap_total
-            
+
             # Credit Cards
             if 'Credit Cards' in liabilities_data['Current Liabilities']:
                 cc_rows = []
@@ -591,7 +509,7 @@ class BalanceSheetConverter:
                         account, f"{data['value']:.2f}", data['id']
                     ))
                     cc_total += data['value']
-                
+
                 if cc_rows:
                     cc_section = self.create_row_object(
                         "Credit Cards", is_section=True, sub_rows=cc_rows
@@ -605,7 +523,7 @@ class BalanceSheetConverter:
                     cc_section["group"] = "CreditCards"
                     current_liab_rows.append(cc_section)
                     current_liab_total += cc_total
-            
+
             # Other Current Liabilities
             if 'Other Current Liabilities' in liabilities_data['Current Liabilities']:
                 other_rows = []
@@ -615,7 +533,7 @@ class BalanceSheetConverter:
                         account, f"{data['value']:.2f}", data['id']
                     ))
                     other_total += data['value']
-                
+
                 if other_rows:
                     other_section = self.create_row_object(
                         "Other Current Liabilities", is_section=True, sub_rows=other_rows
@@ -629,7 +547,7 @@ class BalanceSheetConverter:
                     other_section["group"] = "OtherCurrentLiabilities"
                     current_liab_rows.append(other_section)
                     current_liab_total += other_total
-            
+
             if current_liab_rows:
                 current_liab_section = self.create_row_object(
                     "Current Liabilities", is_section=True, sub_rows=current_liab_rows
@@ -643,13 +561,13 @@ class BalanceSheetConverter:
                 current_liab_section["group"] = "CurrentLiabilities"
                 liabilities_rows.append(current_liab_section)
                 total_liabilities += current_liab_total
-        
+
         # Long-Term Liabilities
         if 'Long-term Liabilities' in liabilities_data:
             lt_rows = []
             lt_total = 0.0
             lt_items = liabilities_data['Long-term Liabilities']
-            
+
             # Handle both direct accounts and grouped accounts
             for account, data in lt_items.items():
                 if isinstance(data, dict) and 'value' in data:
@@ -657,7 +575,7 @@ class BalanceSheetConverter:
                         account, f"{data['value']:.2f}", data['id']
                     ))
                     lt_total += data['value']
-            
+
             if lt_rows:
                 lt_section = self.create_row_object(
                     "Long-Term Liabilities", is_section=True, sub_rows=lt_rows
@@ -671,7 +589,7 @@ class BalanceSheetConverter:
                 lt_section["group"] = "LongTermLiabilities"
                 liabilities_rows.append(lt_section)
                 total_liabilities += lt_total
-        
+
         if liabilities_rows:
             liabilities_section = self.create_row_object(
                 "Liabilities", is_section=True, sub_rows=liabilities_rows
@@ -684,25 +602,25 @@ class BalanceSheetConverter:
             }
             liabilities_section["group"] = "Liabilities"
             le_rows.append(liabilities_section)
-        
+
         # Equity section
         equity_rows = []
         total_equity = 0.0
-        
+
         if 'Equity' in equity_data:
             equity_items = equity_data['Equity']
-            
+
             # Handle both direct accounts and grouped accounts
             for key, value in equity_items.items():
                 if isinstance(value, dict) and 'value' in value:
                     # Direct account with value
                     if key != 'Net Income':  # Net Income is handled separately
                         equity_rows.append(self.create_row_object(
-                            key, f"{value['value']:.2f}" if value['value'] != 0 or key == 'Retained Earnings' else f"{value['value']:.2f}", 
+                            key, f"{value['value']:.2f}" if value['value'] != 0 or key == 'Retained Earnings' else f"{value['value']:.2f}",
                             value['id']
                         ))
                     total_equity += value['value']
-        
+
         # Always add Net Income row
         net_income_row = self.create_row_object("Net Income", None, None, group="NetIncome")
         if 'Equity' in equity_data and 'Net Income' in equity_data['Equity']:
@@ -712,7 +630,7 @@ class BalanceSheetConverter:
                 net_income_row["colData"][1]["value"] = f"{net_income_value:.2f}"
                 total_equity += net_income_value
         equity_rows.append(net_income_row)
-        
+
         if equity_rows:
             equity_section = self.create_row_object(
                 "Equity", is_section=True, sub_rows=equity_rows
@@ -725,7 +643,7 @@ class BalanceSheetConverter:
             }
             equity_section["group"] = "Equity"
             le_rows.append(equity_section)
-        
+
         # Create main LIABILITIES AND EQUITY section
         le_section = self.create_row_object(
             "LIABILITIES AND EQUITY", is_section=True, sub_rows=le_rows
@@ -737,39 +655,39 @@ class BalanceSheetConverter:
             ]
         }
         le_section["group"] = "TotalLiabilitiesAndEquity"
-        
+
         return le_section
-    
+
     def parse_xlsx(self, filepath: Path) -> List[Dict[str, Any]]:
         """Parse XLSX file and convert to balance sheet JSON"""
         if not XLSX_SUPPORT:
             raise ImportError("openpyxl is required for XLSX support. Install with: pip install openpyxl")
-        
+
         workbook = openpyxl.load_workbook(filepath)
         sheet = workbook.active
-        
+
         # Convert to list of lists for easier processing
         rows = []
         for row in sheet.iter_rows(values_only=True):
             rows.append(list(row))
-        
+
         # Find the header row with months
         header_row_idx = -1
         for i, row in enumerate(rows):
-            if row and row[0] and ('Distribution account' in str(row[0]) or 
-                                  any(month in ' '.join(str(cell) for cell in row if cell) 
+            if row and row[0] and ('Distribution account' in str(row[0]) or
+                                  any(month in ' '.join(str(cell) for cell in row if cell)
                                       for month in ['January', 'February', 'March'])):
                 header_row_idx = i
                 break
-        
+
         if header_row_idx == -1:
             raise ValueError("Could not find header row with months")
-        
+
         # Parse using the same logic as CSV
         months = []
         month_columns = []
         header_row = rows[header_row_idx]
-        
+
         for i, cell in enumerate(header_row[1:], 1):  # Skip first column
             if cell:
                 month_str, start_date, end_date = self.parse_month_column(str(cell).strip())
@@ -781,7 +699,7 @@ class BalanceSheetConverter:
                     'end_date': end_date,
                     'header': str(cell).strip()
                 })
-        
+
         # Initialize data structure
         data_by_month = {}
         for month_info in month_columns:
@@ -792,39 +710,39 @@ class BalanceSheetConverter:
                 'liabilities': {},
                 'equity': {}
             }
-        
+
         # Parse data rows (reuse the same logic from CSV parser)
         current_section = None
         current_subsection = None
         current_group = None
-        
+
         for row in rows[header_row_idx + 1:]:
             if not row or not row[0] or 'Accrual Basis' in str(row[0]):
                 continue
-            
+
             account_name = str(row[0]).strip()
-            
+
             if not account_name:
                 continue
-            
+
             # Determine hierarchy level based on account name
             if account_name in ['Assets', 'Liabilities and Equity']:
                 current_section = account_name.lower().replace(' and ', '_').replace(' ', '_')
                 continue
-            elif account_name in ['Current Assets', 'Fixed Assets', 'Other Assets', 
-                                'Liabilities', 'Equity', 'Current Liabilities', 
+            elif account_name in ['Current Assets', 'Fixed Assets', 'Other Assets',
+                                'Liabilities', 'Equity', 'Current Liabilities',
                                 'Long-term Liabilities']:
                 current_subsection = account_name
                 continue
             elif account_name.startswith('Total for '):
                 continue
-            elif any(account_name == cat for cat in ['Bank Accounts', 'Accounts Receivable', 
+            elif any(account_name == cat for cat in ['Bank Accounts', 'Accounts Receivable',
                                                      'Other Current Assets', 'Accounts Payable',
                                                      'Credit Cards', 'Other Current Liabilities',
                                                      'Truck']):
                 current_group = account_name
                 continue
-            
+
             # Process account values
             for month_info in month_columns:
                 if month_info['index'] < len(row) and row[month_info['index']] is not None:
@@ -833,7 +751,7 @@ class BalanceSheetConverter:
                         value = float(value_str) if value_str else 0.0
                     except ValueError:
                         value = 0.0
-                    
+
                     if value != 0.0 or account_name in ['Retained Earnings', 'Net Income']:
                         # Store the account data
                         month = month_info['month']
@@ -846,15 +764,15 @@ class BalanceSheetConverter:
                                 section_data = data_by_month[month]['liabilities']
                         else:
                             continue
-                        
+
                         if current_subsection not in section_data:
                             section_data[current_subsection] = {}
                         if current_group and current_group not in section_data[current_subsection]:
                             section_data[current_subsection][current_group] = {}
-                        
+
                         # Get account ID from lookup or generate one
-                        account_id = self.get_account_id(account_name)
-                        
+                        account_id = self.get_or_create_account_id(account_name)
+
                         if current_group:
                             section_data[current_subsection][current_group][account_name] = {
                                 'value': value,
@@ -865,14 +783,14 @@ class BalanceSheetConverter:
                                 'value': value,
                                 'id': account_id
                             }
-        
+
         return self.build_balance_sheet_json(months, data_by_month)
-    
+
     def parse_pdf(self, filepath: Path) -> List[Dict[str, Any]]:
         """Parse PDF file and convert to balance sheet JSON"""
         if not PDF_SUPPORT:
             raise ImportError("pdfplumber is required for PDF support. Install with: pip install pdfplumber")
-        
+
         with pdfplumber.open(filepath) as pdf:
             # Extract text from all pages
             all_text = ""
@@ -880,10 +798,10 @@ class BalanceSheetConverter:
                 text = page.extract_text()
                 if text:
                     all_text += text + "\n"
-            
+
             # Split into lines for processing
             lines = all_text.split('\n')
-            
+
             # Find header line with months
             header_idx = -1
             for i, line in enumerate(lines):
@@ -895,21 +813,20 @@ class BalanceSheetConverter:
                     if month_count >= 2:
                         header_idx = i
                         break
-            
+
             if header_idx == -1:
                 raise ValueError("Could not find header row with months in PDF")
-            
+
             # Parse months from header
             header_line = lines[header_idx]
             months = []
             month_columns = []
-            
+
             # Extract month names and positions
-            import re
             # Find all month patterns (case insensitive)
             month_pattern = r'(?i)(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+\d{4}|[A-Z]{3}\s+\d+\s*-\s*[A-Z]{3}\s+\d+\s+\d{4}'
             matches = list(re.finditer(month_pattern, header_line, re.IGNORECASE))
-            
+
             for i, match in enumerate(matches):
                 month_text = match.group()
                 month_str, start_date, end_date = self.parse_month_column(month_text)
@@ -922,7 +839,7 @@ class BalanceSheetConverter:
                     'start_pos': match.start(),
                     'end_pos': match.end()
                 })
-            
+
             # Initialize data structure
             data_by_month = {}
             for month_info in month_columns:
@@ -933,18 +850,18 @@ class BalanceSheetConverter:
                     'liabilities': {},
                     'equity': {}
                 }
-            
+
             # Parse data lines
             current_section = None
             current_subsection = None
             current_group = None
-            
+
             for line_idx in range(header_idx + 1, len(lines)):
                 line = lines[line_idx].strip()
-                
+
                 if not line or 'Page' in line:
                     continue
-                
+
                 # Extract account name (usually the first part before numbers)
                 # Find where numbers start
                 number_match = re.search(r'[\d,\.\-\$\s]+$', line)
@@ -954,10 +871,10 @@ class BalanceSheetConverter:
                 else:
                     account_name = line
                     values_part = ""
-                
+
                 if not account_name:
                     continue
-                
+
                 # Determine hierarchy
                 if account_name in ['ASSETS', 'Assets']:
                     current_section = 'assets'
@@ -980,12 +897,12 @@ class BalanceSheetConverter:
                                     'Accounts Payable', 'Credit Cards', 'Other Current Liabilities']:
                     current_group = account_name
                     continue
-                
+
                 # Parse values for each month
                 if values_part and current_section:
                     # Extract all numbers from the values part
                     numbers = re.findall(r'[\-\$]?[\d,]+\.?\d*', values_part)
-                    
+
                     # Try to match numbers to months based on position
                     for i, month_info in enumerate(month_columns):
                         if i < len(numbers):
@@ -994,10 +911,10 @@ class BalanceSheetConverter:
                                 value = float(value_str)
                             except ValueError:
                                 value = 0.0
-                            
+
                             if value != 0.0 or account_name in ['Retained Earnings', 'Net Income']:
                                 month = month_info['month']
-                                
+
                                 if current_section == 'assets':
                                     section_data = data_by_month[month]['assets']
                                 elif current_section == 'liabilities_equity':
@@ -1007,14 +924,14 @@ class BalanceSheetConverter:
                                         section_data = data_by_month[month]['liabilities']
                                 else:
                                     continue
-                                
+
                                 if current_subsection not in section_data:
                                     section_data[current_subsection] = {}
                                 if current_group and current_group not in section_data[current_subsection]:
                                     section_data[current_subsection][current_group] = {}
-                                
-                                account_id = self.get_account_id(account_name)
-                                
+
+                                account_id = self.get_or_create_account_id(account_name)
+
                                 if current_group:
                                     section_data[current_subsection][current_group][account_name] = {
                                         'value': value,
@@ -1025,54 +942,40 @@ class BalanceSheetConverter:
                                         'value': value,
                                         'id': account_id
                                     }
-        
+
         return self.build_balance_sheet_json(months, data_by_month)
-    
+
     def convert_file(self, filepath: Path) -> List[Dict[str, Any]]:
         """Convert a file to balance sheet JSON based on its extension"""
+        filepath = Path(filepath)
         ext = filepath.suffix.lower()
-        
+
         if ext == '.csv':
-            months, data_by_month = self.parse_csv_hierarchy(filepath)
-            return self.build_balance_sheet_json(months, data_by_month)
+            return self.parse_csv(filepath)
         elif ext == '.xlsx':
+            self.check_xlsx_support()
             return self.parse_xlsx(filepath)
         elif ext == '.pdf':
+            self.check_pdf_support()
             return self.parse_pdf(filepath)
         else:
             raise ValueError(f"Unsupported file format: {ext}")
-    
-    def convert_to_json(self, filepath: Path, output_path: Optional[Path] = None) -> str:
-        """Convert a file to JSON format"""
-        try:
-            balance_sheets = self.convert_file(filepath)
-            
-            if output_path:
-                with open(output_path, 'w', encoding='utf-8') as f:
-                    json.dump(balance_sheets, f, indent=2)
-                return f"Converted {len(balance_sheets)} monthly balance sheets to {output_path}"
-            else:
-                return json.dumps(balance_sheets, indent=2)
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            raise
 
 
 def main():
     parser = argparse.ArgumentParser(description='Convert balance sheet documents to JSON format')
     parser.add_argument('input', help='Input file (CSV, XLSX, or PDF)')
     parser.add_argument('-o', '--output', help='Output JSON file (default: print to stdout)')
-    
+
     args = parser.parse_args()
-    
+
     converter = BalanceSheetConverter()
-    
+
     input_path = Path(args.input)
     if not input_path.exists():
         print(f"Error: {input_path} does not exist", file=sys.stderr)
         sys.exit(1)
-    
+
     try:
         if args.output:
             result = converter.convert_to_json(input_path, Path(args.output))

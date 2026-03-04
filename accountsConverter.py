@@ -5,47 +5,32 @@ Converts CSV, XLSX, and PDF account lists to QuickBooks JSON format
 Specifically designed for Chart of Accounts reports
 """
 
-import json
 import csv
+import re
 import sys
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 import argparse
-import re
 from typing import Dict, List, Any, Optional
 
-# Try to import optional dependencies
-try:
+from base_converter import BaseConverter, XLSX_SUPPORT, PDF_SUPPORT
+
+if XLSX_SUPPORT:
     import openpyxl
-    XLSX_SUPPORT = True
-except ImportError:
-    XLSX_SUPPORT = False
-
-try:
+if PDF_SUPPORT:
     import pdfplumber
-    PDF_SUPPORT = True
-except ImportError:
-    PDF_SUPPORT = False
 
 
-class AccountsConverter:
+class AccountsConverter(BaseConverter):
     """Converts Chart of Accounts documents to QuickBooks-style JSON format"""
-    
-    
-    def __init__(self):
-        self.next_id = 200  # Starting ID for generated accounts
-        
-    def generate_account_id(self) -> str:
-        """Generate a unique account ID"""
-        id_str = str(self.next_id)
-        self.next_id += 1
-        return id_str
-    
+
+    def __init__(self, **kwargs):
+        super().__init__(use_account_lookup=False)
+        self.account_id_counter = 200  # Starting ID for generated accounts
+
     def get_classification_from_type(self, type_str: str) -> str:
         """Determine classification based on type string"""
         type_lower = type_str.lower()
-        # Specific account types first (before generic pattern matches)
         if 'accounts payable' in type_lower or type_lower == 'a/p':
             return 'LIABILITY'
         elif 'accounts receivable' in type_lower or type_lower == 'a/r':
@@ -56,7 +41,6 @@ class AccountsConverter:
             return 'LIABILITY'
         elif 'cost of goods sold' in type_lower or type_lower == 'cogs':
             return 'EXPENSE'
-        # Generic pattern matches
         elif 'equity' in type_lower:
             return 'EQUITY'
         elif 'expense' in type_lower:
@@ -68,12 +52,11 @@ class AccountsConverter:
         elif 'liabilit' in type_lower:
             return 'LIABILITY'
         else:
-            return 'EXPENSE'  # Default fallback
-    
+            return 'EXPENSE'
+
     def get_account_type_from_type(self, type_str: str) -> str:
         """Determine account type based on type string"""
         type_lower = type_str.lower()
-        # Specific account types first (before generic pattern matches)
         if 'accounts payable' in type_lower or type_lower == 'a/p':
             return 'ACCOUNTS_PAYABLE'
         elif 'accounts receivable' in type_lower or type_lower == 'a/r':
@@ -84,7 +67,6 @@ class AccountsConverter:
             return 'CREDIT_CARD'
         elif 'cost of goods sold' in type_lower or type_lower == 'cogs':
             return 'COST_OF_GOODS_SOLD'
-        # Generic pattern matches
         elif 'equity' in type_lower:
             return 'EQUITY'
         elif 'other expense' in type_lower:
@@ -110,30 +92,22 @@ class AccountsConverter:
         elif 'liabilit' in type_lower:
             return 'OTHER_CURRENT_LIABILITY'
         else:
-            return 'EXPENSE'  # Default fallback
-    
-    def create_account_object(self, name: str, type_str: str, detail_type: str, 
-                            description: Optional[str] = None, 
-                            balance: float = 0.0) -> Dict[str, Any]:
+            return 'EXPENSE'
+
+    def create_account_object(self, name: str, type_str: str, detail_type: str,
+                              description: Optional[str] = None,
+                              balance: float = 0.0) -> Dict[str, Any]:
         """Create a QuickBooks-style account object"""
-        
-        # Get classification and account type based on the type string
         classification = self.get_classification_from_type(type_str)
         account_type = self.get_account_type_from_type(type_str)
-        
-        # Use detail type as-is (just clean it up a bit)
-        # Remove special characters and normalize spacing
+
         account_subtype = detail_type.strip()
-        # Remove forward slashes and replace with empty string
         account_subtype = account_subtype.replace('/', '')
-        # Replace ampersands with 'And'
         account_subtype = account_subtype.replace('&', 'And')
-        # Replace spaces with no spaces to match QuickBooks format
         account_subtype = account_subtype.replace(' ', '')
-        
-        # Generate timestamp
+
         timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000+00:00')
-        
+
         return {
             "id": self.generate_account_id(),
             "syncToken": "0",
@@ -181,18 +155,16 @@ class AccountsConverter:
             "accountEx": None,
             "finame": None
         }
-    
+
     def parse_csv(self, filepath: Path) -> List[Dict[str, Any]]:
         """Parse CSV file and convert to account objects"""
         accounts = []
-        
+
         with open(filepath, 'r', encoding='utf-8') as f:
-            # Read all lines first to detect format
             all_lines = f.readlines()
-            
+
         print(f"[CSV Parser] Total lines in file: {len(all_lines)}")
-        
-        # Find the header row (contains 'Full name' or 'Name')
+
         header_line_idx = -1
         for idx, line in enumerate(all_lines):
             line_lower = line.lower()
@@ -200,121 +172,110 @@ class AccountsConverter:
                 header_line_idx = idx
                 print(f"[CSV Parser] Found header at line {idx}: {line.strip()}")
                 break
-        
+
         if header_line_idx == -1:
             print(f"[CSV Parser] WARNING: No header row found. First 5 lines:")
             for i, line in enumerate(all_lines[:5]):
                 print(f"  Line {i}: {line.strip()}")
             return accounts
-        
-        # Parse CSV starting from header
+
         from io import StringIO
         csv_content = ''.join(all_lines[header_line_idx:])
         reader = csv.DictReader(StringIO(csv_content))
-        
+
         print(f"[CSV Parser] Column headers: {reader.fieldnames}")
-        
+
         row_count = 0
         skipped_count = 0
-        
+
         for row in reader:
             row_count += 1
-            
-            # Try different column name variations
-            full_name = (row.get('Full name') or row.get('Name') or 
-                        row.get('FULL NAME') or row.get('NAME') or '').strip()
-            
+
+            full_name = (row.get('Full name') or row.get('Name') or
+                         row.get('FULL NAME') or row.get('NAME') or '').strip()
+
             if not full_name:
                 skipped_count += 1
                 print(f"[CSV Parser] Skipping row {row_count}: empty name")
                 continue
-                
+
             if full_name == 'TOTAL':
                 skipped_count += 1
                 print(f"[CSV Parser] Skipping row {row_count}: TOTAL row")
                 continue
-            
-            # Skip rows that look like report metadata
+
             if any(keyword in full_name.lower() for keyword in ['basis', 'gmtz', 'accrual', 'cash']):
                 skipped_count += 1
                 print(f"[CSV Parser] Skipping row {row_count}: metadata keyword in '{full_name}'")
                 continue
-            
-            # Get type and detail type with fallbacks
-            type_str = (row.get('Type') or row.get('TYPE') or 
-                       row.get('Account Type') or '').strip()
-            detail_type = (row.get('Detail type') or row.get('Detail Type') or 
-                          row.get('DETAIL TYPE') or row.get('Sub Type') or '').strip()
+
+            type_str = (row.get('Type') or row.get('TYPE') or
+                        row.get('Account Type') or '').strip()
+            detail_type = (row.get('Detail type') or row.get('Detail Type') or
+                           row.get('DETAIL TYPE') or row.get('Sub Type') or '').strip()
             description = (row.get('Description') or row.get('DESCRIPTION') or '').strip()
-            
-            # Parse balance with fallbacks
-            balance_str = (row.get('Total balance') or row.get('Balance') or 
-                          row.get('TOTAL BALANCE') or row.get('Current Balance') or '0')
+
+            balance_str = (row.get('Total balance') or row.get('Balance') or
+                           row.get('TOTAL BALANCE') or row.get('Current Balance') or '0')
             balance_str = str(balance_str).replace('$', '').replace(',', '').strip()
             try:
                 balance = float(balance_str) if balance_str else 0.0
             except ValueError:
                 balance = 0.0
-            
+
             print(f"[CSV Parser] Processing account: name='{full_name}', type='{type_str}', detail_type='{detail_type}'")
-            
+
             account = self.create_account_object(
                 name=full_name,
                 type_str=type_str,
-                detail_type=detail_type or 'Other',  # Default if missing
+                detail_type=detail_type or 'Other',
                 description=description,
                 balance=balance
             )
             accounts.append(account)
-        
+
         print(f"[CSV Parser] Processed {row_count} rows, created {len(accounts)} accounts, skipped {skipped_count} rows")
-        
+
         return accounts
-    
+
     def parse_xlsx(self, filepath: Path) -> List[Dict[str, Any]]:
         """Parse XLSX file and convert to account objects"""
-        if not XLSX_SUPPORT:
-            raise ImportError("openpyxl is required for XLSX support. Install with: pip install openpyxl")
-        
+        self.check_xlsx_support()
+
         accounts = []
         workbook = openpyxl.load_workbook(filepath)
         sheet = workbook.active
-        
-        # Find header row
+
         header_row = None
         for idx, row in enumerate(sheet.iter_rows(values_only=True), 1):
             if row and 'Full name' in str(row):
                 header_row = idx
                 break
-        
+
         if not header_row:
             raise ValueError("Could not find header row in XLSX file")
-        
-        # Get column indices
+
         headers = list(sheet.iter_rows(min_row=header_row, max_row=header_row, values_only=True))[0]
         col_map = {header: idx for idx, header in enumerate(headers) if header}
-        
-        # Parse data rows
+
         for row in sheet.iter_rows(min_row=header_row + 1, values_only=True):
             if not row or not row[col_map.get('Full name', 0)]:
                 continue
-            
+
             name = str(row[col_map.get('Full name', 0)])
             if name == 'TOTAL':
                 continue
-            
-            # Skip rows that look like report metadata (contain dates/times)
+
             if any(keyword in name.lower() for keyword in ['basis', 'gmtz', 'accrual', 'cash']):
                 continue
-            
-            # Parse balance
+
             balance_str = str(row[col_map.get('Total balance', 4)] or '0')
             balance_str = balance_str.replace('$', '').replace(',', '')
             try:
                 balance = float(balance_str) if balance_str else 0.0
             except ValueError:
                 balance = 0.0
-            
+
             account = self.create_account_object(
                 name=name,
                 type_str=row[col_map.get('Type', 1)] or '',
@@ -323,81 +284,61 @@ class AccountsConverter:
                 balance=balance
             )
             accounts.append(account)
-        
+
         return accounts
-    
+
     def parse_pdf(self, filepath: Path) -> List[Dict[str, Any]]:
         """Parse PDF file and convert to account objects"""
-        if not PDF_SUPPORT:
-            raise ImportError("pdfplumber is required for PDF support. Install with: pip install pdfplumber")
-        
+        self.check_pdf_support()
+
         accounts = []
-        
+
         with pdfplumber.open(filepath) as pdf:
             for page in pdf.pages:
                 text = page.extract_text()
                 if not text:
                     continue
-                
+
                 lines = text.split('\n')
-                
-                # Find header line
+
                 header_idx = -1
                 for i, line in enumerate(lines):
-                    # Look for headers in uppercase
                     if 'FULL NAME' in line and 'TYPE' in line and 'DETAIL TYPE' in line:
                         header_idx = i
                         break
-                
+
                 if header_idx == -1:
                     continue
-                
-                # Process data lines after header
+
                 for i in range(header_idx + 1, len(lines)):
                     line = lines[i].strip()
-                    
+
                     if not line or line.startswith('TOTAL'):
                         break
-                    
-                    # Skip metadata lines
+
                     if any(keyword in line.lower() for keyword in ['basis', 'gmtz', 'accrual', 'cash']):
                         continue
-                    
-                    # Parse the line - this is tricky because columns aren't clearly delimited
-                    # We'll use a heuristic approach based on known patterns
-                    
-                    # Known account types that help us split the line
-                    type_patterns = ['Equity', 'Expenses', 'Income', 'Other Current Assets', 
-                                   'Other Expense', 'Other Income']
-                    
-                    # Find where the type starts
+
+                    type_patterns = ['Equity', 'Expenses', 'Income', 'Other Current Assets',
+                                     'Other Expense', 'Other Income']
+
                     type_start = -1
                     found_type = None
                     for pattern in type_patterns:
                         idx = line.find(pattern)
-                        if idx > 0:  # Must not be at the beginning
+                        if idx > 0:
                             type_start = idx
                             found_type = pattern
                             break
-                    
+
                     if type_start > 0:
-                        # Extract name (everything before type)
                         name = line[:type_start].strip()
-                        
-                        # Extract the rest after type
                         rest = line[type_start + len(found_type):].strip()
-                        
-                        # Try to extract detail type - it's usually the next part
-                        # For simplicity, we'll take everything up to a potential balance
-                        # or use the whole rest if no balance
+
                         detail_type = rest
-                        
-                        # Remove any trailing balance info (usually ends with numbers or $)
-                        import re
                         detail_type = re.sub(r'\s*\$?[\d,]+\.?\d*\s*$', '', detail_type).strip()
-                        
+
                         if not detail_type:
-                            # Use a default based on type
                             if 'Expense' in found_type:
                                 detail_type = 'Other Miscellaneous Service Cost'
                             elif 'Income' in found_type:
@@ -406,7 +347,7 @@ class AccountsConverter:
                                 detail_type = 'Other Current Assets'
                             else:
                                 detail_type = 'Other'
-                        
+
                         account = self.create_account_object(
                             name=name,
                             type_str=found_type,
@@ -414,32 +355,8 @@ class AccountsConverter:
                             balance=0.0
                         )
                         accounts.append(account)
-        
+
         return accounts
-    
-    def convert_file(self, filepath: Path) -> List[Dict[str, Any]]:
-        """Convert a file to account objects based on its extension"""
-        ext = filepath.suffix.lower()
-        
-        if ext == '.csv':
-            return self.parse_csv(filepath)
-        elif ext == '.xlsx':
-            return self.parse_xlsx(filepath)
-        elif ext == '.pdf':
-            return self.parse_pdf(filepath)
-        else:
-            raise ValueError(f"Unsupported file format: {ext}")
-    
-    def convert_to_json(self, filepath: Path, output_path: Optional[Path] = None) -> str:
-        """Convert a file to JSON format"""
-        accounts = self.convert_file(filepath)
-        
-        if output_path:
-            with open(output_path, 'w', encoding='utf-8') as f:
-                json.dump(accounts, f, indent=2)
-            return f"Converted {len(accounts)} accounts to {output_path}"
-        else:
-            return json.dumps(accounts, indent=2)
 
 
 def main():
@@ -447,21 +364,20 @@ def main():
     parser.add_argument('input', help='Input file (CSV, XLSX, or PDF)')
     parser.add_argument('-o', '--output', help='Output JSON file (default: print to stdout)')
     parser.add_argument('--batch', action='store_true', help='Process all files in a directory')
-    
+
     args = parser.parse_args()
-    
+
     converter = AccountsConverter()
-    
+
     if args.batch:
-        # Process all files in directory
         input_path = Path(args.input)
         if not input_path.is_dir():
             print(f"Error: {input_path} is not a directory", file=sys.stderr)
             sys.exit(1)
-        
+
         output_dir = Path(args.output) if args.output else input_path.parent / 'converted'
         output_dir.mkdir(exist_ok=True)
-        
+
         for file in input_path.glob('*'):
             if file.suffix.lower() in ['.csv', '.xlsx', '.pdf']:
                 try:
@@ -471,12 +387,11 @@ def main():
                 except Exception as e:
                     print(f"Error processing {file}: {e}", file=sys.stderr)
     else:
-        # Process single file
         input_path = Path(args.input)
         if not input_path.exists():
             print(f"Error: {input_path} does not exist", file=sys.stderr)
             sys.exit(1)
-        
+
         try:
             if args.output:
                 result = converter.convert_to_json(input_path, Path(args.output))

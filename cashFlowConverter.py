@@ -5,7 +5,6 @@ Converts CSV, XLSX, and PDF cash flow reports to QuickBooks JSON format
 Specifically designed for Cash Flow reports with monthly data
 """
 
-import json
 import csv
 import sys
 import os
@@ -16,121 +15,16 @@ import re
 from typing import Dict, List, Any, Optional, Tuple
 import calendar
 
-# Import account lookup client
-try:
-    from account_lookup_client import get_account_lookup_client
-    ACCOUNT_LOOKUP_AVAILABLE = True
-except ImportError:
-    ACCOUNT_LOOKUP_AVAILABLE = False
-
-# Try to import optional dependencies
-try:
-    import openpyxl
-    XLSX_SUPPORT = True
-except ImportError:
-    XLSX_SUPPORT = False
-
-try:
-    import pdfplumber
-    PDF_SUPPORT = True
-except ImportError:
-    PDF_SUPPORT = False
+from base_converter import BaseConverter, XLSX_SUPPORT, PDF_SUPPORT
 
 
-class CashFlowConverter:
+class CashFlowConverter(BaseConverter):
     """Converts Cash Flow Statement documents to QuickBooks-style JSON format"""
-    
+
     def __init__(self, use_account_lookup: bool = True, api_base_url: str = "http://localhost:8080"):
-        self.account_id_counter = 1
-        self.use_account_lookup = use_account_lookup and ACCOUNT_LOOKUP_AVAILABLE
-        self.account_lookup_client = None
-        
-        if self.use_account_lookup:
-            try:
-                self.account_lookup_client = get_account_lookup_client(api_base_url)
-                # Check if API is available
-                if not self.account_lookup_client.is_api_available():
-                    print("Warning: Account lookup API is not available. Using generated IDs.", file=sys.stderr)
-                    self.use_account_lookup = False
-            except Exception as e:
-                print(f"Warning: Could not initialize account lookup client: {e}. Using generated IDs.", file=sys.stderr)
-                self.use_account_lookup = False
-        
-    def get_account_id(self, account_name: str) -> str:
-        """Get account ID from lookup service or generate one"""
-        if self.use_account_lookup and self.account_lookup_client:
-            # Try to look up the account ID
-            account_id = self.account_lookup_client.lookup_account_id(account_name)
-            if account_id:
-                return account_id
-        
-        # Fallback to generating an ID
-        return self.generate_account_id()
-        
-    def generate_account_id(self) -> str:
-        """Generate a unique account ID"""
-        id_str = str(self.account_id_counter)
-        self.account_id_counter += 1
-        return id_str
-    
-    def parse_month_column(self, column_header: str) -> Tuple[str, date, date]:
-        """Parse month column header to extract month, start and end dates"""
-        # Handle different formats like "January 2025", "Jul 1 - Jul 27 2025", "Aug 1 - Aug 26 2025"
-        if ' - ' in column_header:
-            # Handle partial month format
-            parts = column_header.split(' - ')
-            end_part = parts[1].strip()
-            # Extract month and year from end part
-            match = re.search(r'(\w+)\s+\d+\s+(\d{4})', end_part)
-            if match:
-                month_name = match.group(1)
-                year = int(match.group(2))
-                # Handle abbreviated month names
-                try:
-                    if len(month_name) == 3:
-                        month_num = datetime.strptime(month_name, '%b').month
-                    else:
-                        month_num = datetime.strptime(month_name, '%B').month
-                except ValueError:
-                    month_num = 1  # Default to January
-                
-                # For partial months, use the date range provided
-                start_match = re.search(r'(\w+)\s+(\d+)', parts[0])
-                if start_match:
-                    start_day = int(start_match.group(2))
-                    start_date = date(year, month_num, start_day)
-                else:
-                    start_date = date(year, month_num, 1)
-                
-                end_match = re.search(r'(\w+)\s+(\d+)\s+(\d{4})', parts[1])
-                if end_match:
-                    end_day = int(end_match.group(2))
-                    end_date = date(year, month_num, end_day)
-                else:
-                    end_date = date(year, month_num, calendar.monthrange(year, month_num)[1])
-                
-                month_str = f"{year}-{month_num:02d}"
-                return month_str, start_date, end_date
-        else:
-            # Handle full month format "January 2025"
-            match = re.search(r'(\w+)\s+(\d{4})', column_header)
-            if match:
-                month_name = match.group(1)
-                year = int(match.group(2))
-                try:
-                    month_num = datetime.strptime(month_name, '%B').month
-                except ValueError:
-                    month_num = 1  # Default to January
-                month_str = f"{year}-{month_num:02d}"
-                start_date = date(year, month_num, 1)
-                last_day = calendar.monthrange(year, month_num)[1]
-                end_date = date(year, month_num, last_day)
-                return month_str, start_date, end_date
-        
-        # Default fallback
-        return "2025-01", date(2025, 1, 1), date(2025, 1, 31)
-    
-    def create_row_object(self, name: str, value: Optional[str] = None, 
+        super().__init__(use_account_lookup=use_account_lookup, api_base_url=api_base_url)
+
+    def create_row_object(self, name: str, value: Optional[str] = None,
                          account_id: Optional[str] = None, row_type: str = "DATA",
                          group: Optional[str] = None, is_section: bool = False,
                          sub_rows: Optional[List] = None, is_summary: bool = False) -> Dict[str, Any]:
@@ -145,7 +39,7 @@ class CashFlowConverter:
             "type": row_type if row_type else None,
             "group": group
         }
-        
+
         if is_section:
             # Section header
             row["header"] = {
@@ -175,30 +69,30 @@ class CashFlowConverter:
                 {"attributes": None, "value": value if value else "", "id": None, "href": None}
             ]
             row["type"] = "DATA"
-        
+
         return row
-    
+
     def parse_csv_hierarchy(self, filepath: Path) -> Tuple[List[str], Dict[str, Dict[str, Any]]]:
         """Parse CSV file and extract hierarchical cash flow data"""
         months = []
         data_by_month = {}
-        
+
         with open(filepath, 'r', encoding='utf-8') as f:
             # Use csv reader to handle quoted fields properly
             reader = csv.reader(f)
             rows = list(reader)
-            
+
             # Find the header row with months
             header_row_idx = -1
             for i, row in enumerate(rows):
-                if len(row) > 0 and ('Full name' in row[0] or 
+                if len(row) > 0 and ('Full name' in row[0] or
                                     any(month in ' '.join(row) for month in ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August'])):
                     header_row_idx = i
                     break
-            
+
             if header_row_idx == -1:
                 raise ValueError("Could not find header row with months")
-            
+
             # Parse header to get months
             header_row = rows[header_row_idx]
             month_columns = []
@@ -213,7 +107,7 @@ class CashFlowConverter:
                         'end_date': end_date,
                         'header': part.strip()
                     })
-            
+
             # Initialize data structure for each month
             for month_info in month_columns:
                 data_by_month[month_info['month']] = {
@@ -237,23 +131,23 @@ class CashFlowConverter:
                     'beginning_cash': 0.0,
                     'ending_cash': 0.0
                 }
-            
+
             # Parse data rows
             current_section = None
             in_adjustments = False
-            
+
             # Track running cash balance
             running_cash = 0.0
-            
+
             for row_idx, row in enumerate(rows[header_row_idx + 1:]):
                 if not row or not row[0] or 'Accrual Basis' in row[0]:
                     continue
-                
+
                 line_item = row[0].strip()
-                
+
                 if not line_item:
                     continue
-                
+
                 # Determine section
                 if 'OPERATING ACTIVITIES' in line_item:
                     current_section = 'operating'
@@ -307,7 +201,7 @@ class CashFlowConverter:
                                 value = float(value_str) if value_str else 0.0
                                 month = month_info['month']
                                 data_by_month[month]['net_increase'] = value
-                                
+
                                 # Calculate cash positions
                                 if month_idx == 0:
                                     # First month
@@ -322,7 +216,7 @@ class CashFlowConverter:
                             except ValueError:
                                 pass
                     continue
-                
+
                 # Process regular line items
                 if current_section:
                     for month_info in month_columns:
@@ -333,40 +227,40 @@ class CashFlowConverter:
                                     value = float(value_str)
                                 except ValueError:
                                     continue
-                                
+
                                 month = month_info['month']
-                                
+
                                 if current_section == 'operating':
                                     if line_item == 'Net Income':
                                         data_by_month[month]['operating']['net_income'] = value
                                     elif in_adjustments:
-                                        account_id = self.get_account_id(line_item)
+                                        account_id = self.get_or_create_account_id(line_item)
                                         data_by_month[month]['operating']['adjustments'][line_item] = {
                                             'value': value,
                                             'id': account_id
                                         }
                                 elif current_section == 'investing':
-                                    account_id = self.get_account_id(line_item)
+                                    account_id = self.get_or_create_account_id(line_item)
                                     data_by_month[month]['investing']['items'][line_item] = {
                                         'value': value,
                                         'id': account_id
                                     }
                                 elif current_section == 'financing':
-                                    account_id = self.get_account_id(line_item)
+                                    account_id = self.get_or_create_account_id(line_item)
                                     data_by_month[month]['financing']['items'][line_item] = {
                                         'value': value,
                                         'id': account_id
                                     }
-        
+
         return months, data_by_month
-    
+
     def build_cash_flow_json(self, months: List[str], data_by_month: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Build the complete cash flow JSON structure"""
         result = []
-        
+
         for month in months:
             month_data = data_by_month[month]
-            
+
             # Check if there's any data for this month
             has_data = (
                 month_data['operating']['net_income'] is not None or
@@ -374,7 +268,7 @@ class CashFlowConverter:
                 month_data['investing']['items'] or
                 month_data['financing']['items']
             )
-            
+
             # Create the month object
             month_obj = {
                 "month": month,
@@ -382,15 +276,15 @@ class CashFlowConverter:
                 "startDate": month_data['start_date'].strftime('%Y-%m-%d'),
                 "report": self.create_report_structure(month_data, has_data)
             }
-            
+
             result.append(month_obj)
-        
+
         return result
-    
+
     def create_report_structure(self, month_data: Dict[str, Any], has_data: bool) -> Dict[str, Any]:
         """Create the report structure for a single month"""
         timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000+00:00')
-        
+
         report = {
             "header": {
                 "time": timestamp,
@@ -423,7 +317,7 @@ class CashFlowConverter:
             },
             "rows": {"row": []}
         }
-        
+
         if has_data:
             # Add the Total column
             report["columns"]["column"].append({
@@ -432,27 +326,27 @@ class CashFlowConverter:
                 "metaData": [{"name": "ColKey", "value": "total"}],
                 "columns": None
             })
-            
+
             # Build the rows structure
             rows = []
-            
+
             # OPERATING ACTIVITIES section
             operating_rows = self.build_operating_section(month_data['operating'])
             if operating_rows:
                 rows.append(operating_rows)
-            
+
             # INVESTING ACTIVITIES section
             if month_data['investing']['items']:
                 investing_rows = self.build_investing_section(month_data['investing'])
                 if investing_rows:
                     rows.append(investing_rows)
-            
+
             # FINANCING ACTIVITIES section
             if month_data['financing']['items']:
                 financing_rows = self.build_financing_section(month_data['financing'])
                 if financing_rows:
                     rows.append(financing_rows)
-            
+
             # NET CASH INCREASE FOR PERIOD
             net_increase_value = month_data['net_increase']
             net_increase_row = self.create_row_object(
@@ -462,7 +356,7 @@ class CashFlowConverter:
                 group="CashIncrease"
             )
             rows.append(net_increase_row)
-            
+
             # Cash at beginning/end of period
             if month_data['beginning_cash'] != 0.0:
                 beginning_cash_row = self.create_row_object(
@@ -471,7 +365,7 @@ class CashFlowConverter:
                     group="BeginningCash"
                 )
                 rows.append(beginning_cash_row)
-            
+
             ending_cash_value = month_data['ending_cash']
             ending_cash_row = self.create_row_object(
                 "Cash at end of period",
@@ -480,7 +374,7 @@ class CashFlowConverter:
                 group="EndingCash"
             )
             rows.append(ending_cash_row)
-            
+
             report["rows"]["row"] = rows
         else:
             # No data - create minimal structure
@@ -494,24 +388,24 @@ class CashFlowConverter:
                 self.create_row_object("Net cash increase for period", None, None, group="CashIncrease"),
                 self.create_row_object("Cash at end of period", None, None, group="EndingCash")
             ]
-            
+
             report["rows"]["row"] = rows
-        
+
         return report
-    
+
     def build_operating_section(self, operating_data: Dict[str, Any]) -> Dict[str, Any]:
         """Build the OPERATING ACTIVITIES section"""
         operating_rows = []
-        
+
         # Net Income
         net_income_value = operating_data['net_income']
         if net_income_value is not None:
             operating_rows.append(self.create_row_object(
-                "Net Income", 
+                "Net Income",
                 f"{net_income_value:.2f}",
                 group="NetIncome"
             ))
-        
+
         # Adjustments
         if operating_data['adjustments']:
             adjustment_rows = []
@@ -521,24 +415,24 @@ class CashFlowConverter:
                     f"{account_data['value']:.2f}",
                     account_data['id']
                 ))
-            
+
             adjustments_section = self.create_row_object(
                 "Adjustments to reconcile Net Income to Net Cash provided by operations:",
                 is_section=True,
                 sub_rows=adjustment_rows,
                 group="OperatingAdjustments"
             )
-            
+
             # Add summary for adjustments
             total_adjustments = operating_data['total_adjustments']
             adjustments_section["summary"] = {
                 "colData": [
-                    {"attributes": None, "value": "Total Adjustments to reconcile Net Income to Net Cash provided by operations:", 
+                    {"attributes": None, "value": "Total Adjustments to reconcile Net Income to Net Cash provided by operations:",
                      "id": None, "href": None},
                     {"attributes": None, "value": f"{total_adjustments:.2f}", "id": None, "href": None}
                 ]
             }
-            
+
             operating_rows.append(adjustments_section)
         else:
             # Empty adjustments header
@@ -546,7 +440,7 @@ class CashFlowConverter:
                 "Adjustments to reconcile Net Income to Net Cash provided by operations:",
                 group="OperatingAdjustments"
             ))
-        
+
         # Create main OPERATING ACTIVITIES section
         operating_section = self.create_row_object(
             "OPERATING ACTIVITIES",
@@ -554,23 +448,23 @@ class CashFlowConverter:
             sub_rows=operating_rows,
             group="OperatingActivities"
         )
-        
+
         # Add summary for net cash provided by operating activities
         net_cash = operating_data['net_cash']
         operating_section["summary"] = {
             "colData": [
-                {"attributes": None, "value": "Net cash provided by operating activities", 
+                {"attributes": None, "value": "Net cash provided by operating activities",
                  "id": None, "href": None},
                 {"attributes": None, "value": f"{net_cash:.2f}", "id": None, "href": None}
             ]
         }
-        
+
         return operating_section
-    
+
     def build_investing_section(self, investing_data: Dict[str, Any]) -> Dict[str, Any]:
         """Build the INVESTING ACTIVITIES section"""
         investing_rows = []
-        
+
         # Add items
         for account_name, account_data in investing_data['items'].items():
             investing_rows.append(self.create_row_object(
@@ -578,7 +472,7 @@ class CashFlowConverter:
                 f"{account_data['value']:.2f}",
                 account_data['id']
             ))
-        
+
         # Create INVESTING ACTIVITIES section
         investing_section = self.create_row_object(
             "INVESTING ACTIVITIES",
@@ -586,23 +480,23 @@ class CashFlowConverter:
             sub_rows=investing_rows,
             group="InvestingActivities"
         )
-        
+
         # Add summary
         net_cash = investing_data['net_cash']
         investing_section["summary"] = {
             "colData": [
-                {"attributes": None, "value": "Net cash provided by investing activities", 
+                {"attributes": None, "value": "Net cash provided by investing activities",
                  "id": None, "href": None},
                 {"attributes": None, "value": f"{net_cash:.2f}", "id": None, "href": None}
             ]
         }
-        
+
         return investing_section
-    
+
     def build_financing_section(self, financing_data: Dict[str, Any]) -> Dict[str, Any]:
         """Build the FINANCING ACTIVITIES section"""
         financing_rows = []
-        
+
         # Add items
         for account_name, account_data in financing_data['items'].items():
             financing_rows.append(self.create_row_object(
@@ -610,7 +504,7 @@ class CashFlowConverter:
                 f"{account_data['value']:.2f}",
                 account_data['id']
             ))
-        
+
         # Create FINANCING ACTIVITIES section
         financing_section = self.create_row_object(
             "FINANCING ACTIVITIES",
@@ -618,44 +512,50 @@ class CashFlowConverter:
             sub_rows=financing_rows,
             group="FinancingActivities"
         )
-        
+
         # Add summary
         net_cash = financing_data['net_cash']
         financing_section["summary"] = {
             "colData": [
-                {"attributes": None, "value": "Net cash provided by financing activities", 
+                {"attributes": None, "value": "Net cash provided by financing activities",
                  "id": None, "href": None},
                 {"attributes": None, "value": f"{net_cash:.2f}", "id": None, "href": None}
             ]
         }
-        
+
         return financing_section
-    
+
+    def parse_csv(self, filepath: Path) -> List[Dict[str, Any]]:
+        """Parse CSV file and convert to cash flow JSON"""
+        months, data_by_month = self.parse_csv_hierarchy(filepath)
+        return self.build_cash_flow_json(months, data_by_month)
+
     def parse_xlsx(self, filepath: Path) -> List[Dict[str, Any]]:
         """Parse XLSX file and convert to cash flow JSON"""
         if not XLSX_SUPPORT:
             raise ImportError("openpyxl is required for XLSX support. Install with: pip install openpyxl")
-        
+
+        import openpyxl
         workbook = openpyxl.load_workbook(filepath)
         sheet = workbook.active
-        
+
         # Convert to list of lists for easier processing
         rows = []
         for row in sheet.iter_rows(values_only=True):
             rows.append(list(row))
-        
+
         # Find the header row with months
         header_row_idx = -1
         for i, row in enumerate(rows):
-            if row and row[0] and ('Full name' in str(row[0]) or 
-                                  any(month in ' '.join(str(cell) for cell in row if cell) 
+            if row and row[0] and ('Full name' in str(row[0]) or
+                                  any(month in ' '.join(str(cell) for cell in row if cell)
                                       for month in ['January', 'February', 'March', 'April', 'May', 'June', 'July'])):
                 header_row_idx = i
                 break
-        
+
         if header_row_idx == -1:
             raise ValueError("Could not find header row with months")
-        
+
         # Convert rows to CSV-like format and reuse CSV parser logic
         # This is a bit of a hack, but it keeps the logic consistent
         temp_rows = []
@@ -667,12 +567,12 @@ class CashFlowConverter:
                 else:
                     temp_row.append(str(cell))
             temp_rows.append(temp_row)
-        
+
         # Process using the same logic as CSV
         months = []
         month_columns = []
         header_row = temp_rows[header_row_idx]
-        
+
         for i, part in enumerate(header_row[1:], 1):  # Skip first column
             if part.strip() and part.strip() != 'Total':
                 month_str, start_date, end_date = self.parse_month_column(part.strip())
@@ -684,7 +584,7 @@ class CashFlowConverter:
                     'end_date': end_date,
                     'header': part.strip()
                 })
-        
+
         # Initialize data structure for each month
         data_by_month = {}
         for month_info in month_columns:
@@ -709,21 +609,21 @@ class CashFlowConverter:
                 'beginning_cash': 0.0,
                 'ending_cash': 0.0
             }
-        
+
         # Parse data rows (reuse logic from CSV parser)
         current_section = None
         in_adjustments = False
         running_cash = 0.0
-        
+
         for row_idx, row in enumerate(temp_rows[header_row_idx + 1:]):
             if not row or not row[0] or 'Accrual Basis' in row[0]:
                 continue
-            
+
             line_item = row[0].strip()
-            
+
             if not line_item:
                 continue
-            
+
             # Determine section
             if 'OPERATING ACTIVITIES' in line_item:
                 current_section = 'operating'
@@ -777,7 +677,7 @@ class CashFlowConverter:
                             value = float(value_str) if value_str else 0.0
                             month = month_info['month']
                             data_by_month[month]['net_increase'] = value
-                            
+
                             # Calculate cash positions
                             if month_idx == 0:
                                 # First month
@@ -792,7 +692,7 @@ class CashFlowConverter:
                         except ValueError:
                             pass
                 continue
-            
+
             # Process regular line items
             if current_section:
                 for month_info in month_columns:
@@ -803,38 +703,39 @@ class CashFlowConverter:
                                 value = float(value_str)
                             except ValueError:
                                 continue
-                            
+
                             month = month_info['month']
-                            
+
                             if current_section == 'operating':
                                 if line_item == 'Net Income':
                                     data_by_month[month]['operating']['net_income'] = value
                                 elif in_adjustments:
-                                    account_id = self.get_account_id(line_item)
+                                    account_id = self.get_or_create_account_id(line_item)
                                     data_by_month[month]['operating']['adjustments'][line_item] = {
                                         'value': value,
                                         'id': account_id
                                     }
                             elif current_section == 'investing':
-                                account_id = self.get_account_id(line_item)
+                                account_id = self.get_or_create_account_id(line_item)
                                 data_by_month[month]['investing']['items'][line_item] = {
                                     'value': value,
                                     'id': account_id
                                 }
                             elif current_section == 'financing':
-                                account_id = self.get_account_id(line_item)
+                                account_id = self.get_or_create_account_id(line_item)
                                 data_by_month[month]['financing']['items'][line_item] = {
                                     'value': value,
                                     'id': account_id
                                 }
-        
+
         return self.build_cash_flow_json(months, data_by_month)
-    
+
     def parse_pdf(self, filepath: Path) -> List[Dict[str, Any]]:
         """Parse PDF file and convert to cash flow JSON"""
         if not PDF_SUPPORT:
             raise ImportError("pdfplumber is required for PDF support. Install with: pip install pdfplumber")
-        
+
+        import pdfplumber
         with pdfplumber.open(filepath) as pdf:
             # Extract text from all pages
             all_text = ""
@@ -842,34 +743,33 @@ class CashFlowConverter:
                 text = page.extract_text()
                 if text:
                     all_text += text + "\n"
-            
+
             # Split into lines for processing
             lines = all_text.split('\n')
-            
+
             # Find header line with months or "Full name"
             header_idx = -1
             for i, line in enumerate(lines):
                 line_upper = line.upper()
                 # Look for either months or "Full name" pattern
-                if ('FULL NAME' in line_upper or 
+                if ('FULL NAME' in line_upper or
                     any(month in line_upper for month in ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY'])):
                     header_idx = i
                     break
-            
+
             if header_idx == -1:
                 raise ValueError("Could not find header row in PDF")
-            
+
             # Parse months from header
             header_line = lines[header_idx]
             months = []
             month_columns = []
-            
+
             # Extract month names and positions
-            import re
             # Find all month patterns
             month_pattern = r'(?i)(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+\d{4}|[A-Z]{3}\s+\d+\s*-\s*[A-Z]{3}\s+\d+\s+\d{4}'
             matches = list(re.finditer(month_pattern, header_line, re.IGNORECASE))
-            
+
             for i, match in enumerate(matches):
                 month_text = match.group()
                 month_str, start_date, end_date = self.parse_month_column(month_text)
@@ -882,7 +782,7 @@ class CashFlowConverter:
                     'start_pos': match.start(),
                     'end_pos': match.end()
                 })
-            
+
             # Initialize data structure
             data_by_month = {}
             for month_info in month_columns:
@@ -907,18 +807,18 @@ class CashFlowConverter:
                     'beginning_cash': 0.0,
                     'ending_cash': 0.0
                 }
-            
+
             # Parse data lines
             current_section = None
             in_adjustments = False
             running_cash = 0.0
-            
+
             for line_idx in range(header_idx + 1, len(lines)):
                 line = lines[line_idx].strip()
-                
+
                 if not line or 'Page' in line:
                     continue
-                
+
                 # Extract line item name (before numbers)
                 number_match = re.search(r'[\d,\.\-\$\s]+$', line)
                 if number_match:
@@ -927,10 +827,10 @@ class CashFlowConverter:
                 else:
                     line_item = line
                     values_part = ""
-                
+
                 if not line_item:
                     continue
-                
+
                 # Determine section
                 if 'OPERATING ACTIVITIES' in line_item:
                     current_section = 'operating'
@@ -947,12 +847,12 @@ class CashFlowConverter:
                 elif 'Adjustments to reconcile' in line_item:
                     in_adjustments = True
                     continue
-                
+
                 # Parse values for each month
                 if values_part and current_section:
                     # Extract all numbers from the values part
                     numbers = re.findall(r'[\-\$]?[\d,]+\.?\d*', values_part)
-                    
+
                     # Try to match numbers to months
                     for i, month_info in enumerate(month_columns):
                         if i < len(numbers):
@@ -961,9 +861,9 @@ class CashFlowConverter:
                                 value = float(value_str)
                             except ValueError:
                                 continue
-                            
+
                             month = month_info['month']
-                            
+
                             if 'Net cash provided by' in line_item:
                                 if current_section == 'operating':
                                     data_by_month[month]['operating']['net_cash'] = value
@@ -988,71 +888,41 @@ class CashFlowConverter:
                                 if line_item == 'Net Income':
                                     data_by_month[month]['operating']['net_income'] = value
                                 elif in_adjustments:
-                                    account_id = self.get_account_id(line_item)
+                                    account_id = self.get_or_create_account_id(line_item)
                                     data_by_month[month]['operating']['adjustments'][line_item] = {
                                         'value': value,
                                         'id': account_id
                                     }
                             elif current_section == 'investing':
-                                account_id = self.get_account_id(line_item)
+                                account_id = self.get_or_create_account_id(line_item)
                                 data_by_month[month]['investing']['items'][line_item] = {
                                     'value': value,
                                     'id': account_id
                                 }
                             elif current_section == 'financing':
-                                account_id = self.get_account_id(line_item)
+                                account_id = self.get_or_create_account_id(line_item)
                                 data_by_month[month]['financing']['items'][line_item] = {
                                     'value': value,
                                     'id': account_id
                                 }
-        
+
         return self.build_cash_flow_json(months, data_by_month)
-    
-    def convert_file(self, filepath: Path) -> List[Dict[str, Any]]:
-        """Convert a file to cash flow JSON based on its extension"""
-        ext = filepath.suffix.lower()
-        
-        if ext == '.csv':
-            months, data_by_month = self.parse_csv_hierarchy(filepath)
-            return self.build_cash_flow_json(months, data_by_month)
-        elif ext == '.xlsx':
-            return self.parse_xlsx(filepath)
-        elif ext == '.pdf':
-            return self.parse_pdf(filepath)
-        else:
-            raise ValueError(f"Unsupported file format: {ext}")
-    
-    def convert_to_json(self, filepath: Path, output_path: Optional[Path] = None) -> str:
-        """Convert a file to JSON format"""
-        try:
-            cash_flows = self.convert_file(filepath)
-            
-            if output_path:
-                with open(output_path, 'w', encoding='utf-8') as f:
-                    json.dump(cash_flows, f, indent=2)
-                return f"Converted {len(cash_flows)} monthly cash flow statements to {output_path}"
-            else:
-                return json.dumps(cash_flows, indent=2)
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            raise
 
 
 def main():
     parser = argparse.ArgumentParser(description='Convert cash flow statement documents to JSON format')
     parser.add_argument('input', help='Input file (CSV, XLSX, or PDF)')
     parser.add_argument('-o', '--output', help='Output JSON file (default: print to stdout)')
-    
+
     args = parser.parse_args()
-    
+
     converter = CashFlowConverter()
-    
+
     input_path = Path(args.input)
     if not input_path.exists():
         print(f"Error: {input_path} does not exist", file=sys.stderr)
         sys.exit(1)
-    
+
     try:
         if args.output:
             result = converter.convert_to_json(input_path, Path(args.output))

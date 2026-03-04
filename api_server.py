@@ -26,6 +26,8 @@ from accountsPayableConverter import AccountsPayableConverter
 from accountsReceivableConverter import AccountsReceivableConverter
 from customerConcentrationConverter import CustomerConcentrationConverter
 from vendorConcentrationConverter import VendorConcentrationConverter
+from converters.depreciation_schedule_converter import DepreciationScheduleConverter
+from converters.fixed_asset_register_converter import FixedAssetRegisterConverter
 from batch_processor import BatchProcessor
 from accountsInferenceConverter import convert_general_ledger_to_coa
 
@@ -792,6 +794,60 @@ def convert_vendor_concentration():
                 tmp_path.unlink()
     except Exception as e:
         app.logger.error(f"Error converting vendor concentration: {str(e)}")
+        return jsonify({"error": "Failed to convert file", "details": str(e)}), 500
+
+@app.route('/api/convert/depreciation-schedule', methods=['POST'])
+@require_api_key
+def convert_depreciation_schedule():
+    """Convert Depreciation Schedule document to JSON"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({"error": "No file provided"}), 400
+        file = request.files['file']
+        is_valid, error_msg = validate_file(file)
+        if not is_valid:
+            return jsonify({"error": error_msg}), 400
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp_file:
+            file.save(tmp_file.name)
+            tmp_path = Path(tmp_file.name)
+
+        try:
+            converter = DepreciationScheduleConverter()
+            result = converter.convert_file(tmp_path)
+            return jsonify({"success": True, "data": result, "count": len(result), "filename": secure_filename(file.filename)})
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
+    except Exception as e:
+        app.logger.error(f"Error converting depreciation schedule: {str(e)}")
+        return jsonify({"error": "Failed to convert file", "details": str(e)}), 500
+
+@app.route('/api/convert/fixed-asset-register', methods=['POST'])
+@require_api_key
+def convert_fixed_asset_register():
+    """Convert Fixed Asset Register document to JSON"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({"error": "No file provided"}), 400
+        file = request.files['file']
+        is_valid, error_msg = validate_file(file)
+        if not is_valid:
+            return jsonify({"error": error_msg}), 400
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp_file:
+            file.save(tmp_file.name)
+            tmp_path = Path(tmp_file.name)
+
+        try:
+            converter = FixedAssetRegisterConverter()
+            result = converter.convert_file(tmp_path)
+            return jsonify({"success": True, "data": result, "count": len(result), "filename": secure_filename(file.filename)})
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
+    except Exception as e:
+        app.logger.error(f"Error converting fixed asset register: {str(e)}")
         return jsonify({"error": "Failed to convert file", "details": str(e)}), 500
 
 # Storage-based conversion endpoints - Helper function

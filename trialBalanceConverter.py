@@ -16,96 +16,21 @@ import re
 from typing import Dict, List, Any, Optional, Tuple
 import calendar
 
-# Import account lookup client
-try:
-    from account_lookup_client import get_account_lookup_client
-    ACCOUNT_LOOKUP_AVAILABLE = True
-except ImportError:
-    ACCOUNT_LOOKUP_AVAILABLE = False
+from base_converter import BaseConverter, XLSX_SUPPORT, PDF_SUPPORT
 
-# Try to import optional dependencies
-try:
+if XLSX_SUPPORT:
     import openpyxl
-    XLSX_SUPPORT = True
-except ImportError:
-    XLSX_SUPPORT = False
 
-try:
+if PDF_SUPPORT:
     import pdfplumber
-    PDF_SUPPORT = True
-except ImportError:
-    PDF_SUPPORT = False
 
 
-class TrialBalanceConverter:
+class TrialBalanceConverter(BaseConverter):
     """Converts Trial Balance documents to QuickBooks-style JSON format"""
-    
+
     def __init__(self, use_account_lookup: bool = True, api_base_url: str = "http://localhost:8080"):
-        self.account_id_counter = 1
-        self.account_id_map = {}  # Store consistent IDs for accounts across months
-        self.use_account_lookup = use_account_lookup and ACCOUNT_LOOKUP_AVAILABLE
-        self.account_lookup_client = None
-        
-        if self.use_account_lookup:
-            try:
-                self.account_lookup_client = get_account_lookup_client(api_base_url)
-                # Check if API is available
-                if not self.account_lookup_client.is_api_available():
-                    print("Warning: Account lookup API is not available. Using generated IDs.", file=sys.stderr)
-                    self.use_account_lookup = False
-            except Exception as e:
-                print(f"Warning: Could not initialize account lookup client: {e}. Using generated IDs.", file=sys.stderr)
-                self.use_account_lookup = False
-        
-    def get_or_create_account_id(self, account_name: str) -> str:
-        """Get account ID from lookup service or generate one"""
-        # First check local map for consistency within the conversion
-        if account_name in self.account_id_map:
-            return self.account_id_map[account_name]
-            
-        # Try to look up from API
-        if self.use_account_lookup and self.account_lookup_client:
-            account_id = self.account_lookup_client.lookup_account_id(account_name)
-            if account_id:
-                self.account_id_map[account_name] = account_id
-                return account_id
-        
-        # Fallback to generating an ID
-        account_id = str(self.account_id_counter)
-        self.account_id_counter += 1
-        self.account_id_map[account_name] = account_id
-        return account_id
-    
-    def parse_month_year(self, text: str) -> Tuple[str, str, date, date]:
-        """Parse month and year from various formats"""
-        # Try to match patterns like "January 2025", "Jan 2025", "JAN 2025"
-        match = re.search(r'(\w+)\s+(\d{4})', text)
-        if match:
-            month_name = match.group(1)
-            year = match.group(2)
-            
-            # Convert month name to number
-            try:
-                # Try full month name
-                month_num = datetime.strptime(month_name, '%B').month
-            except ValueError:
-                try:
-                    # Try abbreviated month name
-                    month_num = datetime.strptime(month_name[:3], '%b').month
-                except ValueError:
-                    # Default to January if can't parse
-                    month_num = 1
-            
-            # Create start and end dates
-            start_date = date(int(year), month_num, 1)
-            last_day = calendar.monthrange(int(year), month_num)[1]
-            end_date = date(int(year), month_num, last_day)
-            
-            return month_name.upper()[:3], year, start_date, end_date
-        
-        # Default fallback
-        return "JAN", "2025", date(2025, 1, 1), date(2025, 1, 31)
-    
+        super().__init__(use_account_lookup=use_account_lookup, api_base_url=api_base_url)
+
     def extract_date_from_as_of(self, text: str) -> Tuple[str, str, date, date]:
         """Extract date from 'As of [Date]' format"""
         # Match patterns like "As of May 31, 2024" or "As of May 30, 2025"
@@ -113,7 +38,7 @@ class TrialBalanceConverter:
         if match:
             month_name = match.group(1)
             year = match.group(3)
-            
+
             # Convert month name to number
             try:
                 month_num = datetime.strptime(month_name, '%B').month
@@ -122,18 +47,18 @@ class TrialBalanceConverter:
                     month_num = datetime.strptime(month_name[:3], '%b').month
                 except ValueError:
                     month_num = 1
-            
+
             # Create start and end dates for the month
             start_date = date(int(year), month_num, 1)
             last_day = calendar.monthrange(int(year), month_num)[1]
             end_date = date(int(year), month_num, last_day)
-            
+
             return month_name.upper()[:3], year, start_date, end_date
-        
+
         # Fallback
         return "JAN", "2025", date(2025, 1, 1), date(2025, 1, 31)
-    
-    def create_row_object(self, account_name: str, debit: str = "", credit: str = "", 
+
+    def create_row_object(self, account_name: str, debit: str = "", credit: str = "",
                          account_id: Optional[str] = None, is_total: bool = False) -> Dict[str, Any]:
         """Create a row object for the trial balance"""
         if is_total:
@@ -170,15 +95,15 @@ class TrialBalanceConverter:
                 "type": None,
                 "group": None
             }
-    
+
     def parse_csv_data(self, filepath: Path) -> Dict[str, Dict[str, Any]]:
         """Parse CSV file and extract trial balance data by month"""
         data_by_month = {}
-        
+
         with open(filepath, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
             rows = list(reader)
-            
+
             # Find header row with months
             header_row_idx = -1
             for i, row in enumerate(rows):
@@ -188,14 +113,14 @@ class TrialBalanceConverter:
                     if any(month in row_text.upper() for month in ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER']):
                         header_row_idx = i
                         break
-            
+
             if header_row_idx == -1:
                 raise ValueError("Could not find header row with months")
-            
+
             # Parse months from header
             header_row = rows[header_row_idx]
             month_columns = []
-            
+
             # Find month columns (they usually come in pairs - debit and credit)
             col_idx = 1  # Skip first column (account names)
             while col_idx < len(header_row):
@@ -213,7 +138,7 @@ class TrialBalanceConverter:
                     col_idx += 2  # Skip to next month (assuming debit/credit pairs)
                 else:
                     col_idx += 1
-            
+
             # Initialize data structure for each month
             for month_info in month_columns:
                 month_key = f"{month_info['year']}-{month_info['month']}"
@@ -226,24 +151,24 @@ class TrialBalanceConverter:
                     'total_debit': 0.0,
                     'total_credit': 0.0
                 }
-            
+
             # Parse account data
             for row_idx in range(header_row_idx + 1, len(rows)):
                 row = rows[row_idx]
                 if not row or not row[0] or row[0].strip().upper() in ['TOTAL', 'TOTALS', 'GRAND TOTAL']:
                     continue
-                
+
                 account_name = row[0].strip()
                 if not account_name:
                     continue
-                
+
                 # Get account ID
                 account_id = self.get_or_create_account_id(account_name)
-                
+
                 # Extract values for each month
                 for month_info in month_columns:
                     month_key = f"{month_info['year']}-{month_info['month']}"
-                    
+
                     # Get debit value
                     debit_value = 0.0
                     if month_info['debit_col'] < len(row):
@@ -252,7 +177,7 @@ class TrialBalanceConverter:
                             debit_value = float(debit_str) if debit_str and debit_str != '-' else 0.0
                         except ValueError:
                             debit_value = 0.0
-                    
+
                     # Get credit value
                     credit_value = 0.0
                     if month_info['credit_col'] < len(row):
@@ -261,7 +186,7 @@ class TrialBalanceConverter:
                             credit_value = float(credit_str) if credit_str and credit_str != '-' else 0.0
                         except ValueError:
                             credit_value = 0.0
-                    
+
                     # Add account if it has any value or is a special account
                     if debit_value != 0 or credit_value != 0 or account_name in ['Retained Earnings']:
                         data_by_month[month_key]['accounts'].append({
@@ -272,20 +197,19 @@ class TrialBalanceConverter:
                         })
                         data_by_month[month_key]['total_debit'] += debit_value
                         data_by_month[month_key]['total_credit'] += credit_value
-        
+
         return data_by_month
-    
+
     def parse_single_month_xlsx(self, filepath: Path) -> Dict[str, Dict[str, Any]]:
         """Parse single-month XLSX format (e.g., 'As of December 31, 2025')"""
-        if not XLSX_SUPPORT:
-            raise ImportError("openpyxl is required for XLSX support")
-        
+        self.check_xlsx_support()
+
         # Load without data_only to get formulas, then extract values
         workbook = openpyxl.load_workbook(filepath, data_only=False)
         sheet = workbook.active
-        
+
         data_by_month = {}
-        
+
         # Convert to list of lists and extract values from formulas
         rows = []
         for row in sheet.iter_rows(values_only=True):
@@ -309,11 +233,11 @@ class TrialBalanceConverter:
                     else:
                         row_data.append(cell)
             rows.append(row_data)
-        
+
         if len(rows) < 5:
             print(f"[DEBUG] XLSX has too few rows: {len(rows)}", file=sys.stderr)
             return data_by_month
-        
+
         # Find "As of [Date]" in early rows (typically row 2 or 3)
         date_text = ""
         for i in range(min(5, len(rows))):
@@ -321,15 +245,15 @@ class TrialBalanceConverter:
             if "As of" in row_text:
                 date_text = row_text
                 break
-        
+
         if not date_text:
             print(f"[DEBUG] Could not find 'As of' date in XLSX", file=sys.stderr)
             return data_by_month
-        
+
         # Extract date from header
         month, year, start_date, end_date = self.extract_date_from_as_of(date_text)
         month_key = f"{year}-{month}"
-        
+
         # Initialize month data
         data_by_month[month_key] = {
             'month': month,
@@ -340,12 +264,12 @@ class TrialBalanceConverter:
             'total_debit': 0.0,
             'total_credit': 0.0
         }
-        
+
         # Find DEBIT/CREDIT header row
         header_idx = -1
         debit_col = -1
         credit_col = -1
-        
+
         for i in range(min(10, len(rows))):
             for j, cell in enumerate(rows[i]):
                 cell_str = str(cell).upper()
@@ -356,35 +280,35 @@ class TrialBalanceConverter:
                     credit_col = j
             if header_idx != -1 and debit_col != -1 and credit_col != -1:
                 break
-        
+
         if header_idx == -1:
             print(f"[DEBUG] Could not find DEBIT/CREDIT headers in XLSX", file=sys.stderr)
             return data_by_month
-        
+
         print(f"[DEBUG] Found headers at row {header_idx}, debit col {debit_col}, credit col {credit_col}", file=sys.stderr)
-        
+
         # Parse account data (after header, before TOTAL)
         for row_idx in range(header_idx + 1, len(rows)):
             row = rows[row_idx]
-            
+
             if not row or len(row) < 2:
                 continue
-            
+
             # First column should be account name
             account_name = str(row[0]).strip()
-            
+
             # Stop at TOTAL line
             if account_name.upper() in ['TOTAL', 'TOTALS']:
                 break
-            
+
             # Skip empty account names
             if not account_name or account_name == '' or account_name == 'None':
                 continue
-            
+
             # Skip footer lines (date stamps, etc.)
             if any(skip in account_name.lower() for skip in ['accrual basis', 'gmt', 'pm', 'am']):
                 continue
-            
+
             # Get debit value
             debit_value = 0.0
             if debit_col < len(row):
@@ -394,7 +318,7 @@ class TrialBalanceConverter:
                         debit_value = float(str(debit_cell).replace(',', ''))
                     except (ValueError, AttributeError):
                         debit_value = 0.0
-            
+
             # Get credit value
             credit_value = 0.0
             if credit_col < len(row):
@@ -404,10 +328,10 @@ class TrialBalanceConverter:
                         credit_value = float(str(credit_cell).replace(',', ''))
                     except (ValueError, AttributeError):
                         credit_value = 0.0
-            
+
             # Get account ID
             account_id = self.get_or_create_account_id(account_name)
-            
+
             # Add account if it has any value
             if debit_value != 0 or credit_value != 0:
                 data_by_month[month_key]['accounts'].append({
@@ -418,18 +342,17 @@ class TrialBalanceConverter:
                 })
                 data_by_month[month_key]['total_debit'] += debit_value
                 data_by_month[month_key]['total_credit'] += credit_value
-        
+
         return data_by_month
-    
+
     def parse_xlsx_data(self, filepath: Path) -> Dict[str, Dict[str, Any]]:
         """Parse XLSX file and extract trial balance data by month"""
-        if not XLSX_SUPPORT:
-            raise ImportError("openpyxl is required for XLSX support. Install with: pip install openpyxl")
-        
+        self.check_xlsx_support()
+
         # First, detect format by reading with data_only=True to evaluate formulas
         workbook = openpyxl.load_workbook(filepath, data_only=True)
         sheet = workbook.active
-        
+
         # Convert first few rows to check format
         rows = []
         row_count = 0
@@ -438,7 +361,7 @@ class TrialBalanceConverter:
             row_count += 1
             if row_count >= 10:  # Only need first 10 rows for detection
                 break
-        
+
         # Check if it's single-month format
         has_as_of = False
         for i in range(min(5, len(rows))):
@@ -446,7 +369,7 @@ class TrialBalanceConverter:
             if "As of" in row_text:
                 has_as_of = True
                 break
-        
+
         # Count month columns with years in remaining rows
         # Look at all cells in header rows (typically row 4-5) for month-year patterns
         month_year_count = 0
@@ -456,25 +379,25 @@ class TrialBalanceConverter:
                 # Match patterns like "JAN 2022", "JANUARY 2022", "Jan 2025"
                 if re.search(r'(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+\d{4}', cell_text):
                     month_year_count += 1
-        
+
         print(f"[DEBUG] Format detection: has_as_of={has_as_of}, month_year_count={month_year_count}", file=sys.stderr)
-        
+
         if has_as_of and month_year_count < 2:
             print(f"[DEBUG] Detected single-month XLSX format (has 'As of' and fewer than 2 month columns)", file=sys.stderr)
             return self.parse_single_month_xlsx(filepath)
-        
+
         # Fall back to multi-month parser
         print(f"[DEBUG] Using multi-month XLSX parser", file=sys.stderr)
-        
+
         # Re-load workbook without data_only for multi-month parsing
         workbook = openpyxl.load_workbook(filepath)
         sheet = workbook.active
-        
+
         # Convert to list of lists
         rows = []
         for row in sheet.iter_rows(values_only=True):
             rows.append([str(cell) if cell is not None else '' for cell in row])
-        
+
         # Find header row with months
         header_row_idx = -1
         for i, row in enumerate(rows):
@@ -482,7 +405,7 @@ class TrialBalanceConverter:
                 # Skip rows that are likely report headers (e.g., "As of July 31, 2025")
                 if i < 3 and any(phrase in ' '.join(str(cell) for cell in row if cell).lower() for phrase in ['as of', 'trial balance', 'company']):
                     continue
-                    
+
                 row_text = ' '.join(str(cell) for cell in row if cell)
                 # Look for rows with multiple month names (indicating column headers)
                 month_count = 0
@@ -491,33 +414,33 @@ class TrialBalanceConverter:
                         # Check if it's followed by a year (to confirm it's a month header)
                         if re.search(rf'{month}\s+\d{{4}}', row_text.upper()):
                             month_count += 1
-                
+
                 # If we found at least 2 months with years, this is likely our header row
                 if month_count >= 2:
                     header_row_idx = i
                     break
-        
+
         if header_row_idx == -1:
             raise ValueError("Could not find header row with months")
-        
+
         # Parse months from header
         header_row = rows[header_row_idx]
         month_columns = []
-        
+
         # Find month columns
         col_idx = 1
         while col_idx < len(header_row):
             cell = header_row[col_idx]
             if cell and any(month in str(cell).upper() for month in ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER', 'JAN', 'FEB', 'MAR', 'APR', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']):
                 month, year, start_date, end_date = self.parse_month_year(str(cell))
-                
+
                 # Check if next columns are labeled as Debit/Credit
                 has_labels = False
                 if header_row_idx + 1 < len(rows):
                     next_row = rows[header_row_idx + 1]
                     if col_idx < len(next_row) and 'DEBIT' in next_row[col_idx].upper():
                         has_labels = True
-                
+
                 month_columns.append({
                     'month': month,
                     'year': year,
@@ -530,7 +453,7 @@ class TrialBalanceConverter:
                 col_idx += 2
             else:
                 col_idx += 1
-        
+
         # Initialize data structure
         data_by_month = {}
         for month_info in month_columns:
@@ -544,27 +467,27 @@ class TrialBalanceConverter:
                 'total_debit': 0.0,
                 'total_credit': 0.0
             }
-        
+
         # Skip label row if present
         data_start_row = header_row_idx + 2 if any(m['has_labels'] for m in month_columns) else header_row_idx + 1
-        
+
         # Parse account data
         for row_idx in range(data_start_row, len(rows)):
             row = rows[row_idx]
             if not row or not row[0] or row[0].strip().upper() in ['TOTAL', 'TOTALS', 'GRAND TOTAL']:
                 continue
-            
+
             account_name = row[0].strip()
             if not account_name:
                 continue
-            
+
             # Get account ID
             account_id = self.get_or_create_account_id(account_name)
-            
+
             # Extract values for each month
             for month_info in month_columns:
                 month_key = f"{month_info['year']}-{month_info['month']}"
-                
+
                 # Get debit value
                 debit_value = 0.0
                 if month_info['debit_col'] < len(row):
@@ -588,7 +511,7 @@ class TrialBalanceConverter:
                             debit_value = float(debit_str) if debit_str and debit_str != '-' else 0.0
                         except ValueError:
                             debit_value = 0.0
-                
+
                 # Get credit value
                 credit_value = 0.0
                 if month_info['credit_col'] < len(row):
@@ -612,7 +535,7 @@ class TrialBalanceConverter:
                             credit_value = float(credit_str) if credit_str and credit_str != '-' else 0.0
                         except ValueError:
                             credit_value = 0.0
-                
+
                 # Add account if it has any value or is a special account
                 if debit_value != 0 or credit_value != 0 or account_name in ['Retained Earnings']:
                     data_by_month[month_key]['accounts'].append({
@@ -623,16 +546,15 @@ class TrialBalanceConverter:
                     })
                     data_by_month[month_key]['total_debit'] += debit_value
                     data_by_month[month_key]['total_credit'] += credit_value
-        
+
         return data_by_month
-    
+
     def parse_single_month_pdf(self, filepath: Path) -> Dict[str, Dict[str, Any]]:
         """Parse single-month PDF format (e.g., 'As of May 31, 2024')"""
-        if not PDF_SUPPORT:
-            raise ImportError("pdfplumber is required for PDF support")
-        
+        self.check_pdf_support()
+
         data_by_month = {}
-        
+
         with pdfplumber.open(filepath) as pdf:
             # Extract text from all pages
             full_text = ""
@@ -640,14 +562,14 @@ class TrialBalanceConverter:
                 text = page.extract_text()
                 if text:
                     full_text += text + "\n"
-            
+
             if not full_text:
                 return data_by_month
-            
+
             # Extract date from "As of [Date]" format
             month, year, start_date, end_date = self.extract_date_from_as_of(full_text)
             month_key = f"{year}-{month}"
-            
+
             # Initialize month data
             data_by_month[month_key] = {
                 'month': month,
@@ -658,51 +580,51 @@ class TrialBalanceConverter:
                 'total_debit': 0.0,
                 'total_credit': 0.0
             }
-            
+
             lines = full_text.split('\n')
-            
+
             # Find DEBIT/CREDIT header line
             header_idx = -1
             for i, line in enumerate(lines):
                 if 'DEBIT' in line.upper() and 'CREDIT' in line.upper():
                     header_idx = i
                     break
-            
+
             if header_idx == -1:
                 print(f"[DEBUG] Could not find DEBIT/CREDIT header in PDF", file=sys.stderr)
                 return data_by_month
-            
+
             # Parse account lines (after header, before TOTAL)
             for line_idx in range(header_idx + 1, len(lines)):
                 line = lines[line_idx].strip()
-                
+
                 # Stop at TOTAL line
                 if not line or line.upper().startswith('TOTAL'):
                     break
-                
+
                 # Skip page headers that repeat
                 if any(skip in line.upper() for skip in ['TRIAL BALANCE', 'AS OF', 'ACCRUAL BASIS', 'DEBIT', 'CREDIT']):
                     continue
-                
+
                 # Extract account name and values using regex
                 # Pattern: account name followed by numbers
                 # Account names can contain letters, spaces, parentheses, slashes, colons, etc.
                 match = re.match(r'^(.+?)\s+([\d,]+\.?\d*)\s*([\d,]+\.?\d*)?$', line)
-                
+
                 if match:
                     account_name = match.group(1).strip()
-                    
+
                     # Skip if it looks like a page number or date
                     if account_name.isdigit() or re.match(r'^\d+/\d+$', account_name):
                         continue
-                    
+
                     # Parse debit value
                     debit_str = match.group(2).strip().replace(',', '')
                     try:
                         debit_value = float(debit_str)
                     except ValueError:
                         debit_value = 0.0
-                    
+
                     # Parse credit value (might be empty)
                     credit_value = 0.0
                     if match.group(3):
@@ -711,19 +633,19 @@ class TrialBalanceConverter:
                             credit_value = float(credit_str)
                         except ValueError:
                             credit_value = 0.0
-                    
+
                     # Determine if value is debit or credit based on account type
                     # If only one value present, infer from account name
                     if debit_value > 0 and credit_value == 0:
                         # Check if this is likely a credit account
-                        if any(keyword in account_name.upper() for keyword in 
+                        if any(keyword in account_name.upper() for keyword in
                                ['PAYABLE', 'EQUITY', 'EARNINGS', 'LOAN', 'RETAINED', 'CONTRIBUTIONS', 'REVENUE', 'INCOME', 'SALES', 'SERVICES']):
                             credit_value = debit_value
                             debit_value = 0.0
-                    
+
                     # Get account ID
                     account_id = self.get_or_create_account_id(account_name)
-                    
+
                     # Add account
                     if debit_value != 0 or credit_value != 0:
                         data_by_month[month_key]['accounts'].append({
@@ -734,68 +656,67 @@ class TrialBalanceConverter:
                         })
                         data_by_month[month_key]['total_debit'] += debit_value
                         data_by_month[month_key]['total_credit'] += credit_value
-        
+
         return data_by_month
-    
+
     def parse_pdf_data(self, filepath: Path) -> Dict[str, Dict[str, Any]]:
         """Parse PDF file and extract trial balance data by month"""
-        if not PDF_SUPPORT:
-            raise ImportError("pdfplumber is required for PDF support. Install with: pip install pdfplumber")
-        
+        self.check_pdf_support()
+
         # First, detect format
         with pdfplumber.open(filepath) as pdf:
             first_page_text = pdf.pages[0].extract_text() if pdf.pages else ""
-            
+
             # Check if it's single-month format
             if "As of" in first_page_text and "DEBIT" in first_page_text.upper() and "CREDIT" in first_page_text.upper():
                 # Check if it's NOT multi-month (no multiple month names with years)
                 month_year_pattern = r'(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s+\d{4}'
                 month_matches = re.findall(month_year_pattern, first_page_text.upper())
-                
+
                 if len(month_matches) < 2:  # Single month or no months found
                     print(f"[DEBUG] Detected single-month PDF format", file=sys.stderr)
                     return self.parse_single_month_pdf(filepath)
-        
+
         # Fall back to multi-month parser
         print(f"[DEBUG] Using multi-month PDF parser", file=sys.stderr)
         data_by_month = {}
-        
+
         with pdfplumber.open(filepath) as pdf:
             for page in pdf.pages:
                 # Try to extract tables first
                 tables = page.extract_tables()
-                
+
                 if tables:
                     # Process table data (existing code for table extraction)
                     pass  # Keep existing table extraction code
-                
+
                 # Always try text extraction for columnar PDFs
                 text = page.extract_text()
                 if not text:
                     continue
-                
+
                 lines = text.split('\n')
-                
+
                 # Find the header line with months
                 month_line_idx = -1
                 for i, line in enumerate(lines):
                     if 'JAN 2025' in line and 'FEB 2025' in line:
                         month_line_idx = i
                         break
-                
+
                 if month_line_idx == -1:
                     continue
-                
+
                 # Extract month positions from the header line
                 month_line = lines[month_line_idx]
                 month_positions = []
-                
+
                 # Find each month and its position
                 for match in re.finditer(r'(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s+(\d{4})', month_line):
                     month_name = match.group(1)
                     year = match.group(2)
                     month, year_str, start_date, end_date = self.parse_month_year(f"{month_name} {year}")
-                    
+
                     month_positions.append({
                         'month': month,
                         'year': year_str,
@@ -804,7 +725,7 @@ class TrialBalanceConverter:
                         'start_pos': match.start(),
                         'end_pos': match.end()
                     })
-                
+
                 # Initialize data structure for each month
                 for month_info in month_positions:
                     month_key = f"{month_info['year']}-{month_info['month']}"
@@ -818,40 +739,40 @@ class TrialBalanceConverter:
                             'total_debit': 0.0,
                             'total_credit': 0.0
                         }
-                
+
                 # Parse account data (skip header lines)
                 data_start = month_line_idx + 2  # Skip month line and DEBIT/CREDIT line
-                
+
                 for line_idx in range(data_start, len(lines)):
                     line = lines[line_idx]
                     if not line.strip() or 'TOTAL' in line.upper():
                         continue
-                    
+
                     # Extract account name (text before first number)
                     match = re.match(r'^([A-Za-z\s\(\):/\.\-]+)', line)
                     if not match:
                         continue
-                    
+
                     account_name = match.group(1).strip()
                     if not account_name:
                         continue
-                    
+
                     # Get account ID
                     account_id = self.get_or_create_account_id(account_name)
-                    
+
                     # Extract all numbers from the line
                     numbers = re.findall(r'[\d,]+\.?\d*', line)
-                    
+
                     # Assign numbers to months based on expected pattern
                     # Each month should have 2 values (debit, credit), but some might be missing
                     value_idx = 0
-                    
+
                     for i, month_info in enumerate(month_positions):
                         month_key = f"{month_info['year']}-{month_info['month']}"
-                        
+
                         debit_value = 0.0
                         credit_value = 0.0
-                        
+
                         # Try to get values for this month
                         if value_idx < len(numbers):
                             # Some accounts might only have one value per month
@@ -864,7 +785,7 @@ class TrialBalanceConverter:
                                 else:
                                     debit_value = value
                                 value_idx += 1
-                                
+
                                 # Check if there's a second value for this month
                                 if value_idx < len(numbers) and i < len(month_positions) - 1:
                                     # Check if next value is likely for this month or next month
@@ -878,7 +799,7 @@ class TrialBalanceConverter:
                                         value_idx += 1
                             except (ValueError, IndexError):
                                 pass
-                        
+
                         # Add account if it has values or is special
                         if debit_value != 0 or credit_value != 0 or account_name in ['Retained Earnings']:
                             # Check if account already exists for this month
@@ -892,22 +813,22 @@ class TrialBalanceConverter:
                                 })
                                 data_by_month[month_key]['total_debit'] += debit_value
                                 data_by_month[month_key]['total_credit'] += credit_value
-        
+
         return data_by_month
-    
+
     def build_trial_balance_json(self, data_by_month: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
         """Build the complete trial balance JSON structure"""
         monthly_reports = []
-        
+
         # Sort months chronologically by start_date
         sorted_months = sorted(data_by_month.keys(), key=lambda k: data_by_month[k]['start_date'])
-        
+
         for month_key in sorted_months:
             month_data = data_by_month[month_key]
-            
+
             # Create report structure
             report = self.create_report_structure(month_data)
-            
+
             monthly_reports.append({
                 "month": month_data['month'],
                 "year": month_data['year'],
@@ -915,7 +836,7 @@ class TrialBalanceConverter:
                 "endDate": month_data['end_date'].strftime('%Y-%m-%d'),
                 "report": report
             })
-        
+
         # Create summary
         if monthly_reports:
             summary = {
@@ -931,17 +852,17 @@ class TrialBalanceConverter:
                 "totalMonths": 0,
                 "accountingMethod": "Accrual"
             }
-        
+
         return {
             "monthlyReports": monthly_reports,
             "summary": summary
         }
-    
+
     def create_report_structure(self, month_data: Dict[str, Any]) -> Dict[str, Any]:
         """Create the report structure for a single month"""
         timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000+00:00')
         has_data = len(month_data['accounts']) > 0
-        
+
         # Create column structure
         columns = {
             "column": [
@@ -980,10 +901,10 @@ class TrialBalanceConverter:
                 }
             ]
         }
-        
+
         # Create rows
         rows = []
-        
+
         if has_data:
             # Add account rows
             for account in month_data['accounts']:
@@ -1001,7 +922,7 @@ class TrialBalanceConverter:
                 "",
                 self.get_or_create_account_id("Retained Earnings")
             ))
-        
+
         # Add total row
         rows.append(self.create_row_object(
             "",
@@ -1009,7 +930,7 @@ class TrialBalanceConverter:
             f"{month_data['total_credit']:.2f}",
             is_total=True
         ))
-        
+
         # Create report structure
         report = {
             "header": {
@@ -1034,29 +955,33 @@ class TrialBalanceConverter:
             "columns": columns,
             "rows": {"row": rows}
         }
-        
+
         return report
-    
-    def convert_file(self, filepath: Path) -> Dict[str, Any]:
-        """Convert a file to trial balance JSON based on its extension"""
-        ext = filepath.suffix.lower()
-        
-        if ext == '.csv':
-            data_by_month = self.parse_csv_data(filepath)
-        elif ext == '.xlsx':
-            data_by_month = self.parse_xlsx_data(filepath)
-        elif ext == '.pdf':
-            data_by_month = self.parse_pdf_data(filepath)
-        else:
-            raise ValueError(f"Unsupported file format: {ext}")
-        
+
+    # ──────────────────────────────────────────────
+    # Override base class abstract methods and file dispatch
+    # ──────────────────────────────────────────────
+
+    def parse_csv(self, filepath: Path) -> Dict[str, Any]:
+        """Parse CSV and return trial balance JSON structure."""
+        data_by_month = self.parse_csv_data(filepath)
         return self.build_trial_balance_json(data_by_month)
-    
+
+    def parse_xlsx(self, filepath: Path) -> Dict[str, Any]:
+        """Parse XLSX and return trial balance JSON structure."""
+        data_by_month = self.parse_xlsx_data(filepath)
+        return self.build_trial_balance_json(data_by_month)
+
+    def parse_pdf(self, filepath: Path) -> Dict[str, Any]:
+        """Parse PDF and return trial balance JSON structure."""
+        data_by_month = self.parse_pdf_data(filepath)
+        return self.build_trial_balance_json(data_by_month)
+
     def convert_to_json(self, filepath: Path, output_path: Optional[Path] = None) -> str:
         """Convert a file to JSON format"""
         try:
             trial_balance_data = self.convert_file(filepath)
-            
+
             if output_path:
                 with open(output_path, 'w', encoding='utf-8') as f:
                     json.dump(trial_balance_data, f, indent=2)
@@ -1073,16 +998,16 @@ def main():
     parser = argparse.ArgumentParser(description='Convert trial balance documents to JSON format')
     parser.add_argument('input', help='Input file (CSV, XLSX, or PDF)')
     parser.add_argument('-o', '--output', help='Output JSON file (default: print to stdout)')
-    
+
     args = parser.parse_args()
-    
+
     converter = TrialBalanceConverter()
-    
+
     input_path = Path(args.input)
     if not input_path.exists():
         print(f"Error: {input_path} does not exist", file=sys.stderr)
         sys.exit(1)
-    
+
     try:
         if args.output:
             result = converter.convert_to_json(input_path, Path(args.output))
