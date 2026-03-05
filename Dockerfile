@@ -24,7 +24,6 @@ COPY converters/ ./converters/
 COPY dialects/ ./dialects/
 COPY renderers/ ./renderers/
 COPY canonical/ ./canonical/
-COPY sampleJson/ ./sampleJson/
 
 # Create directory for temporary files
 RUN mkdir -p /tmp/uploads
