@@ -259,7 +259,7 @@ class AccountsReceivableConverter(BaseConverter):
         customers = []
         totals = {'current': 0.0, '1_30': 0.0, '31_60': 0.0, '61_90': 0.0, '91_over': 0.0, 'total': 0.0}
 
-        workbook = openpyxl.load_workbook(filepath)
+        workbook = openpyxl.load_workbook(filepath, data_only=True)
         sheet = workbook.active
 
         header_row = None

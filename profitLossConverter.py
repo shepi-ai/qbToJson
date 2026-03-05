@@ -581,7 +581,7 @@ class ProfitLossConverter(BaseConverter):
         """Parse XLSX file and convert to profit and loss JSON"""
         import openpyxl
 
-        workbook = openpyxl.load_workbook(filepath)
+        workbook = openpyxl.load_workbook(filepath, data_only=True)
         sheet = workbook.active
 
         # Convert to list of lists for easier processing

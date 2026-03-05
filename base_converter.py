@@ -109,16 +109,52 @@ class BaseConverter(ABC):
         filepath = Path(filepath)
         ext = filepath.suffix.lower()
 
-        if ext == '.csv':
-            return self.parse_csv(filepath)
-        elif ext == '.xlsx':
-            self.check_xlsx_support()
-            return self.parse_xlsx(filepath)
-        elif ext == '.pdf':
-            self.check_pdf_support()
-            return self.parse_pdf(filepath)
-        else:
-            raise ValueError(f"Unsupported file format: {ext}")
+        try:
+            if ext == '.csv':
+                return self.parse_csv(filepath)
+            elif ext == '.xlsx':
+                self.check_xlsx_support()
+                return self.parse_xlsx(filepath)
+            elif ext == '.pdf':
+                self.check_pdf_support()
+                return self.parse_pdf(filepath)
+            else:
+                raise ValueError(f"Unsupported file format: {ext}")
+        except (ValueError, KeyError) as e:
+            # Try to detect if this is a non-QB accounting system
+            detected_dialect = self._detect_file_dialect(filepath, ext)
+            if detected_dialect:
+                raise ValueError(
+                    f"This file appears to be from {detected_dialect.name}. "
+                    f"Currently only QuickBooks Online formats are supported."
+                ) from e
+            # Otherwise, re-raise original error
+            raise
+
+    def _detect_file_dialect(self, filepath: Path, ext: str):
+        """Extract headers from file and detect dialect."""
+        from dialects.registry import DialectRegistry
+        
+        headers = []
+        try:
+            if ext == '.csv':
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    reader = csv.reader(f)
+                    for _ in range(5):  # Check first 5 rows for headers
+                        row = next(reader, None)
+                        if row:
+                            headers.extend(row)
+            elif ext == '.xlsx':
+                if not XLSX_SUPPORT:
+                    return None
+                workbook = openpyxl.load_workbook(filepath)
+                sheet = workbook.active
+                for row in sheet.iter_rows(max_row=5, values_only=True):
+                    headers.extend([str(cell) for cell in row if cell])
+        except:
+            return None
+        
+        return DialectRegistry.detect(headers)
 
     def convert_to_json(self, filepath: Path, output_path: Optional[Path] = None) -> str:
         """Convert file to JSON, optionally writing to disk."""

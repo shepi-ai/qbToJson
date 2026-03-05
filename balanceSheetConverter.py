@@ -663,7 +663,7 @@ class BalanceSheetConverter(BaseConverter):
         if not XLSX_SUPPORT:
             raise ImportError("openpyxl is required for XLSX support. Install with: pip install openpyxl")
 
-        workbook = openpyxl.load_workbook(filepath)
+        workbook = openpyxl.load_workbook(filepath, data_only=True)
         sheet = workbook.active
 
         # Convert to list of lists for easier processing

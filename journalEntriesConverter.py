@@ -123,7 +123,7 @@ class JournalEntriesConverter(BaseConverter):
 
     def parse_xlsx(self, file_path):
         """Parse XLSX format journal entries"""
-        wb = openpyxl.load_workbook(file_path)
+        wb = openpyxl.load_workbook(file_path, data_only=True)
         sheet = wb.active
 
         # Find header row

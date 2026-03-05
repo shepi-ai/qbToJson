@@ -470,7 +470,7 @@ class GeneralLedgerConverter(BaseConverter):
         """Parse XLSX file and convert to general ledger JSON"""
         self.check_xlsx_support()
 
-        workbook = openpyxl.load_workbook(filepath)
+        workbook = openpyxl.load_workbook(filepath, data_only=True)
         sheet = workbook.active
 
         # Convert to list of lists for easier processing

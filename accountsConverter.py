@@ -263,7 +263,7 @@ class AccountsConverter(BaseConverter):
 
         accounts = []
         parent_ids = {}
-        workbook = openpyxl.load_workbook(filepath)
+        workbook = openpyxl.load_workbook(filepath, data_only=True)
         sheet = workbook.active
 
         header_row = None

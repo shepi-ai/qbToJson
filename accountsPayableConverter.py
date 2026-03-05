@@ -111,16 +111,16 @@ class AccountsPayableConverter(BaseConverter):
                     if vendor_name and vendor_name.upper() == 'TOTAL':
                         totals['current'] = self.parse_amount(row.get('CURRENT', '0'))
                         totals['1_30'] = self.parse_amount(row.get('1 - 30', '0'))
-                        totals['31_60'] = self.parse_amount(row.get('31 - 50', '0'))
-                        totals['61_90'] = self.parse_amount(row.get('51 - 60', '0'))
+                        totals['31_60'] = self.parse_amount(row.get('31 - 60', '0'))
+                        totals['61_90'] = self.parse_amount(row.get('61 - 90', '0'))
                         totals['91_over'] = self.parse_amount(row.get('91 AND OVER', '0'))
                         totals['total'] = self.parse_amount(row.get('Total', '0'))
                     break
 
                 current = self.parse_amount(row.get('CURRENT', '0'))
                 days_1_30 = self.parse_amount(row.get('1 - 30', '0'))
-                days_31_60 = self.parse_amount(row.get('31 - 50', '0'))
-                days_61_90 = self.parse_amount(row.get('51 - 60', '0'))
+                days_31_60 = self.parse_amount(row.get('31 - 60', '0'))
+                days_61_90 = self.parse_amount(row.get('61 - 90', '0'))
                 days_91_over = self.parse_amount(row.get('91 AND OVER', '0'))
                 total = self.parse_amount(row.get('Total', '0'))
 
@@ -151,7 +151,7 @@ class AccountsPayableConverter(BaseConverter):
         totals = {'current': 0.0, '1_30': 0.0, '31_60': 0.0, '61_90': 0.0, '91_over': 0.0, 'total': 0.0}
         vendor_id = 1
 
-        workbook = openpyxl.load_workbook(filepath)
+        workbook = openpyxl.load_workbook(filepath, data_only=True)
         sheet = workbook.active
 
         header_row = None
@@ -175,18 +175,18 @@ class AccountsPayableConverter(BaseConverter):
             if vendor_name.upper() == 'TOTAL':
                 totals['current'] = self.parse_amount(str(row[col_map.get('CURRENT', 1)] or '0'))
                 totals['1_30'] = self.parse_amount(str(row[col_map.get('1 - 30', 2)] or '0'))
-                totals['31_60'] = self.parse_amount(str(row[col_map.get('31 - 50', 3)] or '0'))
-                totals['61_90'] = self.parse_amount(str(row[col_map.get('51 - 60', 4)] or '0'))
-                totals['91_over'] = self.parse_amount(str(row[col_map.get('91 AND OVER', 6)] or '0'))
-                totals['total'] = self.parse_amount(str(row[col_map.get('Total', 7)] or '0'))
+                totals['31_60'] = self.parse_amount(str(row[col_map.get('31 - 60', 3)] or '0'))
+                totals['61_90'] = self.parse_amount(str(row[col_map.get('61 - 90', 4)] or '0'))
+                totals['91_over'] = self.parse_amount(str(row[col_map.get('91 AND OVER', 5)] or '0'))
+                totals['total'] = self.parse_amount(str(row[col_map.get('Total', 6)] or '0'))
                 break
 
             current = self.parse_amount(str(row[col_map.get('CURRENT', 1)] or '0'))
             days_1_30 = self.parse_amount(str(row[col_map.get('1 - 30', 2)] or '0'))
-            days_31_60 = self.parse_amount(str(row[col_map.get('31 - 50', 3)] or '0'))
-            days_61_90 = self.parse_amount(str(row[col_map.get('51 - 60', 4)] or '0'))
-            days_91_over = self.parse_amount(str(row[col_map.get('91 AND OVER', 6)] or '0'))
-            total = self.parse_amount(str(row[col_map.get('Total', 7)] or '0'))
+            days_31_60 = self.parse_amount(str(row[col_map.get('31 - 60', 3)] or '0'))
+            days_61_90 = self.parse_amount(str(row[col_map.get('61 - 90', 4)] or '0'))
+            days_91_over = self.parse_amount(str(row[col_map.get('91 AND OVER', 5)] or '0'))
+            total = self.parse_amount(str(row[col_map.get('Total', 6)] or '0'))
 
             vendor_row = self.create_vendor_row(
                 vendor_name, str(vendor_id),
