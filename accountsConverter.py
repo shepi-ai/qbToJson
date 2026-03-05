@@ -96,7 +96,8 @@ class AccountsConverter(BaseConverter):
 
     def create_account_object(self, name: str, type_str: str, detail_type: str,
                               description: Optional[str] = None,
-                              balance: float = 0.0) -> Dict[str, Any]:
+                              balance: float = 0.0,
+                              parent_id: Optional[str] = None) -> Dict[str, Any]:
         """Create a QuickBooks-style account object"""
         classification = self.get_classification_from_type(type_str)
         account_type = self.get_account_type_from_type(type_str)
@@ -107,6 +108,17 @@ class AccountsConverter(BaseConverter):
         account_subtype = account_subtype.replace(' ', '')
 
         timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000+00:00')
+
+        # Detect sub-account from colon-separated name
+        is_sub_account = ':' in name
+        if is_sub_account:
+            fully_qualified_name = name
+            leaf_name = name.split(':')[-1].strip()
+            parent_ref = {"value": parent_id, "name": None, "type": None} if parent_id else None
+        else:
+            fully_qualified_name = name
+            leaf_name = name
+            parent_ref = None
 
         return {
             "id": self.generate_account_id(),
@@ -124,11 +136,11 @@ class AccountsConverter(BaseConverter):
             "domain": "QBO",
             "status": None,
             "sparse": False,
-            "name": name,
-            "subAccount": False,
-            "parentRef": None,
-            "description": description,
-            "fullyQualifiedName": name,
+            "name": leaf_name,
+            "subAccount": is_sub_account,
+            "parentRef": parent_ref,
+            "description": description if description else None,
+            "fullyQualifiedName": fully_qualified_name,
             "accountAlias": None,
             "txnLocationType": None,
             "active": True,
@@ -159,6 +171,8 @@ class AccountsConverter(BaseConverter):
     def parse_csv(self, filepath: Path) -> List[Dict[str, Any]]:
         """Parse CSV file and convert to account objects"""
         accounts = []
+        # Track parent account IDs for sub-account references
+        parent_ids = {}  # Maps parent name to its generated ID
 
         with open(filepath, 'r', encoding='utf-8') as f:
             all_lines = f.readlines()
@@ -196,17 +210,14 @@ class AccountsConverter(BaseConverter):
 
             if not full_name:
                 skipped_count += 1
-                print(f"[CSV Parser] Skipping row {row_count}: empty name")
                 continue
 
             if full_name == 'TOTAL':
                 skipped_count += 1
-                print(f"[CSV Parser] Skipping row {row_count}: TOTAL row")
                 continue
 
             if any(keyword in full_name.lower() for keyword in ['basis', 'gmtz', 'accrual', 'cash']):
                 skipped_count += 1
-                print(f"[CSV Parser] Skipping row {row_count}: metadata keyword in '{full_name}'")
                 continue
 
             type_str = (row.get('Type') or row.get('TYPE') or
@@ -223,16 +234,24 @@ class AccountsConverter(BaseConverter):
             except ValueError:
                 balance = 0.0
 
-            print(f"[CSV Parser] Processing account: name='{full_name}', type='{type_str}', detail_type='{detail_type}'")
+            # Determine parent ID for sub-accounts
+            parent_id = None
+            if ':' in full_name:
+                parent_name = full_name.rsplit(':', 1)[0]
+                parent_id = parent_ids.get(parent_name)
 
             account = self.create_account_object(
                 name=full_name,
                 type_str=type_str,
                 detail_type=detail_type or 'Other',
                 description=description,
-                balance=balance
+                balance=balance,
+                parent_id=parent_id
             )
             accounts.append(account)
+
+            # Track this account's ID for potential sub-accounts
+            parent_ids[full_name] = account['id']
 
         print(f"[CSV Parser] Processed {row_count} rows, created {len(accounts)} accounts, skipped {skipped_count} rows")
 
@@ -243,6 +262,7 @@ class AccountsConverter(BaseConverter):
         self.check_xlsx_support()
 
         accounts = []
+        parent_ids = {}
         workbook = openpyxl.load_workbook(filepath)
         sheet = workbook.active
 
@@ -276,14 +296,22 @@ class AccountsConverter(BaseConverter):
             except ValueError:
                 balance = 0.0
 
+            # Determine parent ID for sub-accounts
+            parent_id = None
+            if ':' in name:
+                parent_name = name.rsplit(':', 1)[0]
+                parent_id = parent_ids.get(parent_name)
+
             account = self.create_account_object(
                 name=name,
                 type_str=row[col_map.get('Type', 1)] or '',
                 detail_type=row[col_map.get('Detail type', 2)] or '',
                 description=row[col_map.get('Description', 3)],
-                balance=balance
+                balance=balance,
+                parent_id=parent_id
             )
             accounts.append(account)
+            parent_ids[name] = account['id']
 
         return accounts
 

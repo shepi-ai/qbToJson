@@ -66,6 +66,14 @@ class VendorConcentrationConverter(BaseConverter):
 
         return self.calculate_percentages(vendors)
 
+    def _sum_row_values(self, row, value_col_indices: List[int]) -> float:
+        """Sum all numeric values across the given column indices for a row"""
+        total = 0.0
+        for idx in value_col_indices:
+            if idx < len(row) and row[idx] is not None:
+                total += self.parse_amount(str(row[idx]))
+        return total
+
     def parse_xlsx(self, filepath: Path) -> List[Dict[str, Any]]:
         """Parse XLSX file and convert to simplified JSON array format"""
         self.check_xlsx_support()
@@ -77,9 +85,16 @@ class VendorConcentrationConverter(BaseConverter):
 
         header_row = None
         for idx, row in enumerate(sheet.iter_rows(values_only=True), 1):
-            if row and any('Vendor' in str(cell) for cell in row if cell):
+            if row and row[0] and str(row[0]).strip() == 'Vendor':
                 header_row = idx
                 break
+
+        if not header_row:
+            # Fallback: look for any row where first cell contains just 'Vendor'
+            for idx, row in enumerate(sheet.iter_rows(values_only=True), 1):
+                if row and any(str(cell).strip() == 'Vendor' for cell in row if cell):
+                    header_row = idx
+                    break
 
         if not header_row:
             raise ValueError("Could not find header row in XLSX file")
@@ -87,11 +102,19 @@ class VendorConcentrationConverter(BaseConverter):
         headers = list(sheet.iter_rows(min_row=header_row, max_row=header_row, values_only=True))[0]
         col_map = {str(header).strip(): idx for idx, header in enumerate(headers) if header}
 
+        # Determine value columns: prefer 'Total' column, otherwise sum all non-Vendor columns
+        has_total_col = 'Total' in col_map
+        vendor_col = col_map.get('Vendor', 0)
+        if has_total_col:
+            value_col_indices = [col_map['Total']]
+        else:
+            value_col_indices = [idx for idx, header in enumerate(headers) if header and idx != vendor_col]
+
         for row in sheet.iter_rows(min_row=header_row + 1, values_only=True):
-            if not row or not row[col_map.get('Vendor', 0)]:
+            if not row or not row[vendor_col]:
                 continue
 
-            vendor_name = str(row[col_map.get('Vendor', 0)]).strip()
+            vendor_name = str(row[vendor_col]).strip()
 
             if vendor_name.upper() == 'VENDOR':
                 continue
@@ -105,7 +128,7 @@ class VendorConcentrationConverter(BaseConverter):
             if vendor_name.upper() == 'TOTAL':
                 break
 
-            total = self.parse_amount(str(row[col_map.get('Total', 1)] or '0'))
+            total = self._sum_row_values(row, value_col_indices)
 
             vendors.append({
                 'vendorName': vendor_name,

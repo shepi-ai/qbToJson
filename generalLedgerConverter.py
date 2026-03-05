@@ -757,7 +757,7 @@ class GeneralLedgerConverter(BaseConverter):
                 "time": timestamp,
                 "reportName": "GeneralLedger",
                 "dateMacro": None,
-                "reportBasis": None,
+                "reportBasis": "ACCRUAL",
                 "startPeriod": start_date.strftime('%Y-%m-%d'),
                 "endPeriod": end_date.strftime('%Y-%m-%d'),
                 "summarizeColumnsBy": None,
@@ -774,14 +774,14 @@ class GeneralLedgerConverter(BaseConverter):
             },
             "columns": {
                 "column": [
-                    {"colTitle": "Date", "colType": "tx_date", "metaData": None, "columns": None},
-                    {"colTitle": "Transaction Type", "colType": "txn_type", "metaData": None, "columns": None},
-                    {"colTitle": "Num", "colType": "doc_num", "metaData": None, "columns": None},
-                    {"colTitle": "Name", "colType": "name", "metaData": None, "columns": None},
-                    {"colTitle": "Memo/Description", "colType": "memo", "metaData": None, "columns": None},
-                    {"colTitle": "Split", "colType": "split_acc", "metaData": None, "columns": None},
-                    {"colTitle": "Amount", "colType": "amount", "metaData": None, "columns": None},
-                    {"colTitle": "Balance", "colType": "balance", "metaData": None, "columns": None}
+                    {"colTitle": "Date", "colType": "Date", "metaData": [{"name": "ColKey", "value": "tx_date"}], "columns": None},
+                    {"colTitle": "Transaction Type", "colType": "String", "metaData": [{"name": "ColKey", "value": "txn_type"}], "columns": None},
+                    {"colTitle": "Num", "colType": "String", "metaData": [{"name": "ColKey", "value": "doc_num"}], "columns": None},
+                    {"colTitle": "Name", "colType": "String", "metaData": [{"name": "ColKey", "value": "name"}], "columns": None},
+                    {"colTitle": "Memo/Description", "colType": "String", "metaData": [{"name": "ColKey", "value": "memo"}], "columns": None},
+                    {"colTitle": "Split", "colType": "String", "metaData": [{"name": "ColKey", "value": "split_acc"}], "columns": None},
+                    {"colTitle": "Amount", "colType": "Money", "metaData": [{"name": "ColKey", "value": "subt_nat_amount"}], "columns": None},
+                    {"colTitle": "Balance", "colType": "Money", "metaData": [{"name": "ColKey", "value": "rbal_nat_amount"}], "columns": None}
                 ]
             },
             "rows": {"row": []}

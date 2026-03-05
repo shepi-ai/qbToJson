@@ -85,8 +85,10 @@ class CashFlowConverter(BaseConverter):
             # Find the header row with months
             header_row_idx = -1
             for i, row in enumerate(rows):
-                if len(row) > 0 and ('Full name' in row[0] or
-                                    any(month in ' '.join(row) for month in ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August'])):
+                if len(row) > 1 and (
+                    'Full name' in row[0] or
+                    sum(1 for cell in row[1:] if cell and any(month in cell for month in ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August'])) >= 2
+                ):
                     header_row_idx = i
                     break
 
@@ -547,9 +549,10 @@ class CashFlowConverter(BaseConverter):
         # Find the header row with months
         header_row_idx = -1
         for i, row in enumerate(rows):
-            if row and row[0] and ('Full name' in str(row[0]) or
-                                  any(month in ' '.join(str(cell) for cell in row if cell)
-                                      for month in ['January', 'February', 'March', 'April', 'May', 'June', 'July'])):
+            if row and len(row) > 1 and (
+                (row[0] and 'Full name' in str(row[0])) or
+                sum(1 for cell in row[1:] if cell and any(month in str(cell) for month in ['January', 'February', 'March', 'April', 'May', 'June', 'July'])) >= 2
+            ):
                 header_row_idx = i
                 break
 

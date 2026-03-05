@@ -376,42 +376,58 @@ class JournalEntriesConverter(BaseConverter):
                 "id": trans['id'],
                 "syncToken": "0",
                 "metaData": {
+                    "createdByRef": None,
                     "createTime": date_obj.strftime('%Y-%m-%dT%H:%M:%S.000+00:00'),
-                    "lastUpdatedTime": date_obj.strftime('%Y-%m-%dT%H:%M:%S.000+00:00')
+                    "lastModifiedByRef": None,
+                    "lastUpdatedTime": date_obj.strftime('%Y-%m-%dT%H:%M:%S.000+00:00'),
+                    "lastChangedInQB": None,
+                    "synchronized": None
                 },
                 "customField": [],
                 "attachableRef": [],
                 "domain": "QBO",
+                "status": None,
                 "sparse": False,
-                "docNumber": trans.get('num'),
+                "docNumber": trans.get('num') or None,
                 "txnDate": date_obj.strftime('%Y-%m-%dT00:00:00.000+00:00'),
+                "departmentRef": None,
                 "currencyRef": {
                     "value": "USD",
-                    "name": "United States Dollar"
+                    "name": "United States Dollar",
+                    "type": None
                 },
-                "privateNote": trans.get('memo', ''),
+                "exchangeRate": None,
+                "privateNote": trans.get('memo', '') or None,
+                "txnStatus": None,
                 "linkedTxn": [],
                 "line": [],
                 "txnTaxDetail": {
+                    "defaultTaxCodeRef": None,
                     "txnTaxCodeRef": None,
                     "totalTax": None,
+                    "taxReviewStatus": None,
                     "taxLine": [],
                     "useAutomatedSalesTax": None
                 },
+                "txnSource": None,
+                "taxFormType": None,
+                "taxFormNum": None,
+                "transactionLocationType": None,
+                "tag": [],
+                "txnApprovalInfo": None,
+                "recurDataRef": None,
+                "recurringInfo": None,
+                "projectRef": None,
+                "totalCostAmount": None,
+                "homeTotalCostAmount": None,
                 "adjustment": False,
-                "globalTaxCalculation": None
+                "homeCurrencyAdjustment": None,
+                "enteredInHomeCurrency": None,
+                "globalTaxCalculation": None,
+                "totalAmt": 0.0,
+                "homeTotalAmt": None,
+                "journalEntryEx": None
             }
-
-            # Add transaction type info in a custom field or private note
-            if trans.get('type'):
-                entry['privateNote'] = f"{trans['type']}: {entry['privateNote']}" if entry['privateNote'] else trans['type']
-
-            # Add name to private note if present
-            if trans.get('name'):
-                if entry['privateNote']:
-                    entry['privateNote'] += f" - {trans['name']}"
-                else:
-                    entry['privateNote'] = trans['name']
 
             # Process line items
             line_num = 0
@@ -433,18 +449,52 @@ class JournalEntriesConverter(BaseConverter):
 
                 line_item = {
                     "id": str(line_num),
-                    "description": line['description'],
+                    "lineNum": None,
+                    "description": line['description'] or None,
                     "amount": amount,
+                    "received": None,
                     "linkedTxn": [],
                     "detailType": "JOURNAL_ENTRY_LINE_DETAIL",
+                    "paymentLineDetail": None,
+                    "discountLineDetail": None,
+                    "taxLineDetail": None,
+                    "salesItemLineDetail": None,
+                    "descriptionLineDetail": None,
+                    "itemBasedExpenseLineDetail": None,
+                    "accountBasedExpenseLineDetail": None,
+                    "reimburseLineDetail": None,
+                    "depositLineDetail": None,
+                    "purchaseOrderItemLineDetail": None,
+                    "salesOrderItemLineDetail": None,
+                    "itemReceiptLineDetail": None,
                     "journalEntryLineDetail": {
                         "postingType": posting_type,
+                        "entity": None,
                         "accountRef": {
-                            "value": account_id or str(100 + line_num),  # Default ID if lookup fails
-                            "name": line['account']
-                        }
+                            "value": account_id or str(100 + line_num),
+                            "name": line['account'],
+                            "type": None
+                        },
+                        "classRef": None,
+                        "departmentRef": None,
+                        "taxCodeRef": None,
+                        "taxRateRef": None,
+                        "taxApplicableOn": None,
+                        "taxAmount": None,
+                        "taxInclusiveAmt": None,
+                        "billableStatus": None,
+                        "journalCodeRef": None,
+                        "journalEntryLineDetailEx": None
                     },
-                    "customField": []
+                    "groupLineDetail": None,
+                    "subTotalLineDetail": None,
+                    "itemAdjustmentLineDetail": None,
+                    "customField": [],
+                    "lineEx": None,
+                    "projectRef": None,
+                    "costAmount": None,
+                    "homeCostAmount": None,
+                    "tdslineDetail": None
                 }
 
                 entry['line'].append(line_item)
@@ -453,7 +503,7 @@ class JournalEntriesConverter(BaseConverter):
             # Calculate total amount (should be 0 for balanced entries)
             total_debits = sum(l['debit'] for l in trans['lines'])
             total_credits = sum(l['credit'] for l in trans['lines'])
-            entry['totalAmt'] = abs(total_debits - total_credits)
+            entry['totalAmt'] = round(abs(total_debits - total_credits), 2)
 
             journal_entries.append(entry)
 

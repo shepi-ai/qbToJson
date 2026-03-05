@@ -72,12 +72,15 @@ class CustomerConcentrationConverter(BaseConverter):
                 total = self.parse_amount(row.get('Total', '0'))
 
                 if total == 0.0:
+                    # Could be a parent (group header) or standalone zero-revenue customer
+                    # Add as entry either way; "Total for" rows will update parents
                     current_parent = customer_name
-                    customer_map[customer_name] = {
-                        'customerName': customer_name,
-                        'revenue': 0.0,
-                        'percentage': 0.0
-                    }
+                    if customer_name not in customer_map:
+                        customer_map[customer_name] = {
+                            'customerName': customer_name,
+                            'revenue': 0.0,
+                            'percentage': 0.0
+                        }
                     continue
 
                 if current_parent and current_parent in customer_map:
@@ -92,6 +95,14 @@ class CustomerConcentrationConverter(BaseConverter):
 
         return self.calculate_percentages(list(customer_map.values()))
 
+    def _sum_row_values(self, row, value_col_indices: List[int]) -> float:
+        """Sum all numeric values across the given column indices for a row"""
+        total = 0.0
+        for idx in value_col_indices:
+            if idx < len(row) and row[idx] is not None:
+                total += self.parse_amount(str(row[idx]))
+        return total
+
     def parse_xlsx(self, filepath: Path) -> List[Dict[str, Any]]:
         """Parse XLSX file and convert to simplified JSON array format"""
         self.check_xlsx_support()
@@ -101,12 +112,19 @@ class CustomerConcentrationConverter(BaseConverter):
         workbook = openpyxl.load_workbook(filepath, data_only=True)
         sheet = workbook.active
 
-        # Find header row
+        # Find header row - look for row where first cell is exactly "Customer"
         header_row = None
         for idx, row in enumerate(sheet.iter_rows(values_only=True), 1):
-            if row and any('Customer' in str(cell) for cell in row if cell):
+            if row and row[0] and str(row[0]).strip() == 'Customer':
                 header_row = idx
                 break
+
+        if not header_row:
+            # Fallback: look for any row where a cell is exactly 'Customer'
+            for idx, row in enumerate(sheet.iter_rows(values_only=True), 1):
+                if row and any(str(cell).strip() == 'Customer' for cell in row if cell):
+                    header_row = idx
+                    break
 
         if not header_row:
             raise ValueError("Could not find header row in XLSX file")
@@ -114,13 +132,22 @@ class CustomerConcentrationConverter(BaseConverter):
         headers = list(sheet.iter_rows(min_row=header_row, max_row=header_row, values_only=True))[0]
         col_map = {str(header).strip(): idx for idx, header in enumerate(headers) if header}
 
+        # Determine value columns: prefer 'Total' column, otherwise sum all non-Customer columns
+        has_total_col = 'Total' in col_map
+        customer_col = col_map.get('Customer', 0)
+        if has_total_col:
+            value_col_indices = [col_map['Total']]
+        else:
+            # Monthly breakdown - sum all numeric columns except Customer
+            value_col_indices = [idx for idx, header in enumerate(headers) if header and idx != customer_col]
+
         current_parent = None
 
         for row in sheet.iter_rows(min_row=header_row + 1, values_only=True):
-            if not row or not row[col_map.get('Customer', 0)]:
+            if not row or not row[customer_col]:
                 continue
 
-            customer_name = str(row[col_map.get('Customer', 0)]).strip()
+            customer_name = str(row[customer_col]).strip()
 
             if customer_name.upper() == 'CUSTOMER':
                 continue
@@ -137,20 +164,23 @@ class CustomerConcentrationConverter(BaseConverter):
             if customer_name.startswith('Total for '):
                 parent_name = customer_name.replace('Total for ', '')
                 if parent_name in customer_map:
-                    total = self.parse_amount(str(row[col_map.get('Total', 1)] or '0'))
+                    total = self._sum_row_values(row, value_col_indices)
                     customer_map[parent_name]['revenue'] = total
                 current_parent = None
                 continue
 
-            total = self.parse_amount(str(row[col_map.get('Total', 1)] or '0'))
+            total = self._sum_row_values(row, value_col_indices)
 
             if total == 0.0:
+                # Check if this is a parent by looking ahead (has "Total for" row)
+                # For now, add it as a potential parent AND as an entry
                 current_parent = customer_name
-                customer_map[customer_name] = {
-                    'customerName': customer_name,
-                    'revenue': 0.0,
-                    'percentage': 0.0
-                }
+                if customer_name not in customer_map:
+                    customer_map[customer_name] = {
+                        'customerName': customer_name,
+                        'revenue': 0.0,
+                        'percentage': 0.0
+                    }
                 continue
 
             if current_parent and current_parent in customer_map:

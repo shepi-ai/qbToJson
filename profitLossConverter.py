@@ -250,7 +250,7 @@ class ProfitLossConverter(BaseConverter):
 
                 # Parse subsection
                 idx += 1
-                idx, items = self.parse_section_items(rows, idx, month_columns)
+                idx, items = self.parse_section_items(rows, idx, month_columns, section_name=account_name)
                 section_data['items'] = items
 
                 # Add section to all months
@@ -291,7 +291,7 @@ class ProfitLossConverter(BaseConverter):
         return idx
 
     def parse_section_items(self, rows: List[List[str]], start_idx: int,
-                          month_columns: List[Dict]) -> Tuple[int, List[Dict]]:
+                          month_columns: List[Dict], section_name: str = "") -> Tuple[int, List[Dict]]:
         """Parse items within a section"""
         items = []
         idx = start_idx
@@ -310,7 +310,12 @@ class ProfitLossConverter(BaseConverter):
 
             # Check if we've hit the end of this section
             if account_name.lower().startswith('total for '):
-                return idx + 1, items
+                total_name = account_name[len('total for '):].strip().lower()
+                if not section_name or total_name == section_name.lower():
+                    return idx + 1, items
+                # Otherwise it's a sub-group total — skip it
+                idx += 1
+                continue
 
             # Check if this is a new major section
             row_type = self.detect_hierarchy_level(row, idx, rows)

@@ -54,3 +54,6 @@ Thumbs.db
 .coverage
 htmlcov/
 .pytest_cache/
+
+# User-uploaded sample reports (may contain real customer data)
+sampleReports/sampleUserReports/

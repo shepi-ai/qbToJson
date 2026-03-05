@@ -162,6 +162,10 @@ class TrialBalanceConverter(BaseConverter):
                 if not account_name:
                     continue
 
+                # Skip metadata lines
+                if any(skip in account_name.lower() for skip in ['accrual basis', 'gmt', 'gmtz']):
+                    continue
+
                 # Get account ID
                 account_id = self.get_or_create_account_id(account_name)
 
@@ -169,26 +173,32 @@ class TrialBalanceConverter(BaseConverter):
                 for month_info in month_columns:
                     month_key = f"{month_info['year']}-{month_info['month']}"
 
-                    # Get debit value
+                    # Get debit value - track if cell has explicit data
                     debit_value = 0.0
+                    debit_present = False
                     if month_info['debit_col'] < len(row):
                         debit_str = row[month_info['debit_col']].strip().replace(',', '').replace('$', '').replace('(', '-').replace(')', '')
-                        try:
-                            debit_value = float(debit_str) if debit_str and debit_str != '-' else 0.0
-                        except ValueError:
-                            debit_value = 0.0
+                        if debit_str and debit_str != '-':
+                            debit_present = True
+                            try:
+                                debit_value = float(debit_str)
+                            except ValueError:
+                                debit_value = 0.0
 
-                    # Get credit value
+                    # Get credit value - track if cell has explicit data
                     credit_value = 0.0
+                    credit_present = False
                     if month_info['credit_col'] < len(row):
                         credit_str = row[month_info['credit_col']].strip().replace(',', '').replace('$', '').replace('(', '-').replace(')', '')
-                        try:
-                            credit_value = float(credit_str) if credit_str and credit_str != '-' else 0.0
-                        except ValueError:
-                            credit_value = 0.0
+                        if credit_str and credit_str != '-':
+                            credit_present = True
+                            try:
+                                credit_value = float(credit_str)
+                            except ValueError:
+                                credit_value = 0.0
 
-                    # Add account if it has any value or is a special account
-                    if debit_value != 0 or credit_value != 0 or account_name in ['Retained Earnings']:
+                    # Include if any value is present (even 0) or is a special account
+                    if debit_present or credit_present or account_name in ['Retained Earnings']:
                         data_by_month[month_key]['accounts'].append({
                             'name': account_name,
                             'id': account_id,
@@ -332,16 +342,15 @@ class TrialBalanceConverter(BaseConverter):
             # Get account ID
             account_id = self.get_or_create_account_id(account_name)
 
-            # Add account if it has any value
-            if debit_value != 0 or credit_value != 0:
-                data_by_month[month_key]['accounts'].append({
-                    'name': account_name,
-                    'id': account_id,
-                    'debit': debit_value,
-                    'credit': credit_value
-                })
-                data_by_month[month_key]['total_debit'] += debit_value
-                data_by_month[month_key]['total_credit'] += credit_value
+            # Include all accounts (even zero-value) to match QB API output
+            data_by_month[month_key]['accounts'].append({
+                'name': account_name,
+                'id': account_id,
+                'debit': debit_value,
+                'credit': credit_value
+            })
+            data_by_month[month_key]['total_debit'] += debit_value
+            data_by_month[month_key]['total_credit'] += credit_value
 
         return data_by_month
 
@@ -393,10 +402,12 @@ class TrialBalanceConverter(BaseConverter):
         workbook = openpyxl.load_workbook(filepath)
         sheet = workbook.active
 
-        # Convert to list of lists
+        # Convert to list of lists, preserving None vs 0 distinction
         rows = []
+        raw_rows = []  # Keep original values to distinguish None from 0
         for row in sheet.iter_rows(values_only=True):
             rows.append([str(cell) if cell is not None else '' for cell in row])
+            raw_rows.append(list(row))
 
         # Find header row with months
         header_row_idx = -1
@@ -474,11 +485,16 @@ class TrialBalanceConverter(BaseConverter):
         # Parse account data
         for row_idx in range(data_start_row, len(rows)):
             row = rows[row_idx]
+            raw_row = raw_rows[row_idx] if row_idx < len(raw_rows) else []
             if not row or not row[0] or row[0].strip().upper() in ['TOTAL', 'TOTALS', 'GRAND TOTAL']:
                 continue
 
             account_name = row[0].strip()
             if not account_name:
+                continue
+
+            # Skip metadata lines (e.g., "Accrual Basis Wednesday, March 04, 2026...")
+            if any(skip in account_name.lower() for skip in ['accrual basis', 'gmt', 'gmtz']):
                 continue
 
             # Get account ID
@@ -488,24 +504,24 @@ class TrialBalanceConverter(BaseConverter):
             for month_info in month_columns:
                 month_key = f"{month_info['year']}-{month_info['month']}"
 
+                # Check raw cell values to distinguish None (absent) from 0 (explicit zero)
+                raw_debit = raw_row[month_info['debit_col']] if month_info['debit_col'] < len(raw_row) else None
+                raw_credit = raw_row[month_info['credit_col']] if month_info['credit_col'] < len(raw_row) else None
+                debit_present = raw_debit is not None
+                credit_present = raw_credit is not None
+
                 # Get debit value
                 debit_value = 0.0
-                if month_info['debit_col'] < len(row):
+                if debit_present and month_info['debit_col'] < len(row):
                     debit_str = row[month_info['debit_col']].strip().replace(',', '').replace('$', '').replace('(', '-').replace(')', '')
-                    # Handle Excel formulas
                     if debit_str.startswith('='):
-                        # For formulas, we'll need to evaluate them or skip
-                        # For now, try to extract numeric value if it's a simple formula
                         if '=' in debit_str and any(c.isdigit() for c in debit_str):
-                            # Extract numbers from formula
                             numbers = re.findall(r'[\d.]+', debit_str)
                             if numbers:
                                 try:
                                     debit_value = float(numbers[0])
                                 except ValueError:
                                     debit_value = 0.0
-                        else:
-                            debit_value = 0.0
                     else:
                         try:
                             debit_value = float(debit_str) if debit_str and debit_str != '-' else 0.0
@@ -514,30 +530,24 @@ class TrialBalanceConverter(BaseConverter):
 
                 # Get credit value
                 credit_value = 0.0
-                if month_info['credit_col'] < len(row):
+                if credit_present and month_info['credit_col'] < len(row):
                     credit_str = row[month_info['credit_col']].strip().replace(',', '').replace('$', '').replace('(', '-').replace(')', '')
-                    # Handle Excel formulas
                     if credit_str.startswith('='):
-                        # For formulas, we'll need to evaluate them or skip
-                        # For now, try to extract numeric value if it's a simple formula
                         if '=' in credit_str and any(c.isdigit() for c in credit_str):
-                            # Extract numbers from formula
                             numbers = re.findall(r'[\d.]+', credit_str)
                             if numbers:
                                 try:
                                     credit_value = float(numbers[0])
                                 except ValueError:
                                     credit_value = 0.0
-                        else:
-                            credit_value = 0.0
                     else:
                         try:
                             credit_value = float(credit_str) if credit_str and credit_str != '-' else 0.0
                         except ValueError:
                             credit_value = 0.0
 
-                # Add account if it has any value or is a special account
-                if debit_value != 0 or credit_value != 0 or account_name in ['Retained Earnings']:
+                # Only include if at least one cell has data (not None in raw XLSX)
+                if debit_present or credit_present:
                     data_by_month[month_key]['accounts'].append({
                         'name': account_name,
                         'id': account_id,
@@ -646,16 +656,15 @@ class TrialBalanceConverter(BaseConverter):
                     # Get account ID
                     account_id = self.get_or_create_account_id(account_name)
 
-                    # Add account
-                    if debit_value != 0 or credit_value != 0:
-                        data_by_month[month_key]['accounts'].append({
-                            'name': account_name,
-                            'id': account_id,
-                            'debit': debit_value,
-                            'credit': credit_value
-                        })
-                        data_by_month[month_key]['total_debit'] += debit_value
-                        data_by_month[month_key]['total_credit'] += credit_value
+                    # Include all accounts (even zero-value) to match QB API output
+                    data_by_month[month_key]['accounts'].append({
+                        'name': account_name,
+                        'id': account_id,
+                        'debit': debit_value,
+                        'credit': credit_value
+                    })
+                    data_by_month[month_key]['total_debit'] += debit_value
+                    data_by_month[month_key]['total_credit'] += credit_value
 
         return data_by_month
 
@@ -800,19 +809,18 @@ class TrialBalanceConverter(BaseConverter):
                             except (ValueError, IndexError):
                                 pass
 
-                        # Add account if it has values or is special
-                        if debit_value != 0 or credit_value != 0 or account_name in ['Retained Earnings']:
-                            # Check if account already exists for this month
-                            existing = next((acc for acc in data_by_month[month_key]['accounts'] if acc['name'] == account_name), None)
-                            if not existing:
-                                data_by_month[month_key]['accounts'].append({
-                                    'name': account_name,
-                                    'id': account_id,
-                                    'debit': debit_value,
-                                    'credit': credit_value
-                                })
-                                data_by_month[month_key]['total_debit'] += debit_value
-                                data_by_month[month_key]['total_credit'] += credit_value
+                        # Include all accounts (even zero-value) to match QB API output
+                        # Check if account already exists for this month
+                        existing = next((acc for acc in data_by_month[month_key]['accounts'] if acc['name'] == account_name), None)
+                        if not existing:
+                            data_by_month[month_key]['accounts'].append({
+                                'name': account_name,
+                                'id': account_id,
+                                'debit': debit_value,
+                                'credit': credit_value
+                            })
+                            data_by_month[month_key]['total_debit'] += debit_value
+                            data_by_month[month_key]['total_credit'] += credit_value
 
         return data_by_month
 
