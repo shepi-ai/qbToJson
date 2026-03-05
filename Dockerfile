@@ -20,6 +20,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY *.py ./
+COPY converters/ ./converters/
+COPY dialects/ ./dialects/
+COPY renderers/ ./renderers/
+COPY canonical/ ./canonical/
+COPY sampleJson/ ./sampleJson/
 
 # Create directory for temporary files
 RUN mkdir -p /tmp/uploads
