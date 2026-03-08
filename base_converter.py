@@ -308,7 +308,11 @@ class BaseConverter(ABC):
         """
         Parse a month column header to ISO month key + date range.
 
-        Handles: "January 2025", "Jul 1 - Jul 27 2025"
+        Handles: 
+        - "January 2025" (full month name)
+        - "Jan 2025" (abbreviated month name)
+        - "Jul 1 - Jul 27 2025" (date range)
+        
         Returns: (iso_month "2025-01", start_date, end_date)
         """
         if ' - ' in column_header:
@@ -334,7 +338,18 @@ class BaseConverter(ABC):
             if match:
                 month_name = match.group(1)
                 year = int(match.group(2))
-                month_num = datetime.strptime(month_name, '%B').month
+                
+                # Try full month name first (%B = January, February, ...)
+                try:
+                    month_num = datetime.strptime(month_name, '%B').month
+                except ValueError:
+                    # Fall back to abbreviated month name (%b = Jan, Feb, ...)
+                    try:
+                        month_num = datetime.strptime(month_name[:3], '%b').month
+                    except ValueError:
+                        # If both fail, default to January
+                        month_num = 1
+                
                 start_date = date(year, month_num, 1)
                 last_day = calendar.monthrange(year, month_num)[1]
                 end_date = date(year, month_num, last_day)

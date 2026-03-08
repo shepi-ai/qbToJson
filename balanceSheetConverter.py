@@ -31,6 +31,104 @@ class BalanceSheetConverter(BaseConverter):
 
     def __init__(self, use_account_lookup: bool = True, api_base_url: str = "http://localhost:8080"):
         super().__init__(use_account_lookup=use_account_lookup, api_base_url=api_base_url)
+    
+    def detect_header_row(self, rows: List[List[Any]], file_format: str = "CSV") -> Tuple[int, str]:
+        """
+        Intelligently detect the header row with month columns using multiple strategies.
+        Returns (header_row_index, detection_method) or raises ValueError with detailed debugging info.
+        """
+        # Month name patterns (both full and abbreviated)
+        full_months = ['january', 'february', 'march', 'april', 'may', 'june', 
+                      'july', 'august', 'september', 'october', 'november', 'december']
+        abbr_months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 
+                      'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+        
+        # Strategy 1: Look for rows with "Distribution account" or similar accounting terms
+        for i, row in enumerate(rows[:20]):  # Check first 20 rows
+            if not row or not row[0]:
+                continue
+            first_col = str(row[0]).strip().lower()
+            
+            if any(term in first_col for term in ['distribution account', 'account name', 'account', 'description']):
+                # Verify this row has month-like columns
+                row_text = ' '.join(str(cell).lower() for cell in row[1:] if cell)
+                month_count = sum(1 for month in full_months + abbr_months if month in row_text)
+                if month_count >= 2:
+                    print(f"✅ [BS-PARSER] Found header at row {i} via Strategy 1 (accounting term + months)", file=sys.stderr)
+                    return i, "accounting_term_with_months"
+        
+        # Strategy 2: Look for rows with multiple month names (most flexible)
+        for i, row in enumerate(rows[:20]):
+            if not row:
+                continue
+            row_text = ' '.join(str(cell).lower() for cell in row if cell)
+            
+            # Count full month names
+            full_month_count = sum(1 for month in full_months if month in row_text)
+            # Count abbreviated month names
+            abbr_month_count = sum(1 for month in abbr_months if month in row_text)
+            
+            if full_month_count >= 2 or abbr_month_count >= 3:
+                print(f"✅ [BS-PARSER] Found header at row {i} via Strategy 2 ({full_month_count} full months, {abbr_month_count} abbr months)", file=sys.stderr)
+                return i, "multiple_month_names"
+        
+        # Strategy 3: Look for date patterns (MM/YYYY, MM-YYYY, Month YYYY)
+        date_pattern = r'\b(0?[1-9]|1[0-2])[/-]\d{4}\b|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{4}\b'
+        for i, row in enumerate(rows[:20]):
+            if not row:
+                continue
+            row_text = ' '.join(str(cell).lower() for cell in row if cell)
+            matches = re.findall(date_pattern, row_text, re.IGNORECASE)
+            if len(matches) >= 2:
+                print(f"✅ [BS-PARSER] Found header at row {i} via Strategy 3 ({len(matches)} date patterns)", file=sys.stderr)
+                return i, "date_patterns"
+        
+        # Strategy 4: Look for rows with numeric columns that might be month headers
+        # (e.g., "1", "2", "3" or "Q1", "Q2")
+        for i, row in enumerate(rows[:20]):
+            if not row or len(row) < 3:
+                continue
+            # Check if row has multiple cells that look like period indicators
+            period_count = 0
+            for cell in row[1:]:  # Skip first column
+                if cell and str(cell).strip():
+                    cell_str = str(cell).strip().lower()
+                    # Check for month numbers, quarter indicators, or year patterns
+                    if re.match(r'^(0?[1-9]|1[0-2])$', cell_str):  # Month numbers 1-12
+                        period_count += 1
+                    elif re.match(r'^q[1-4]', cell_str):  # Quarter indicators
+                        period_count += 1
+                    elif re.match(r'^\d{4}$', cell_str):  # Year
+                        period_count += 1
+            
+            if period_count >= 2:
+                print(f"✅ [BS-PARSER] Found header at row {i} via Strategy 4 ({period_count} period indicators)", file=sys.stderr)
+                return i, "period_indicators"
+        
+        # If all strategies fail, provide detailed debugging information
+        print("❌ [BS-PARSER] Could not find header row with months. Debugging info:", file=sys.stderr)
+        print(f"   File format: {file_format}", file=sys.stderr)
+        print(f"   Total rows: {len(rows)}", file=sys.stderr)
+        print(f"   Searched for:", file=sys.stderr)
+        print(f"   - Accounting terms: 'distribution account', 'account name', 'account'", file=sys.stderr)
+        print(f"   - Full month names: {', '.join(full_months[:3])}...", file=sys.stderr)
+        print(f"   - Abbreviated month names: {', '.join(abbr_months[:3])}...", file=sys.stderr)
+        print(f"   - Date patterns: MM/YYYY, Month YYYY", file=sys.stderr)
+        print(f"   - Period indicators: 1-12, Q1-Q4, YYYY", file=sys.stderr)
+        print(f"", file=sys.stderr)
+        print(f"   First 10 rows of the file:", file=sys.stderr)
+        for i, row in enumerate(rows[:10]):
+            if row:
+                # Show first 3 cells to avoid overwhelming output
+                preview = [str(cell)[:50] for cell in row[:3] if cell]
+                print(f"   Row {i}: {' | '.join(preview)}", file=sys.stderr)
+        
+        raise ValueError(
+            "Could not find header row with months. "
+            "The file may not be a Balance Sheet by Month report, or it uses an unsupported format. "
+            "Expected format: A header row containing month names (Jan, February, etc.) or date patterns (01/2024, January 2024). "
+            "See stderr output above for detailed debugging information."
+        )
 
     def create_row_object(self, name: str, value: Optional[str] = None,
                          account_id: Optional[str] = None, row_type: str = "DATA",
@@ -80,15 +178,12 @@ class BalanceSheetConverter(BaseConverter):
             reader = csv.reader(f)
             rows = list(reader)
 
-            # Find the header row with months
-            header_row_idx = -1
-            for i, row in enumerate(rows):
-                if len(row) > 0 and ('Distribution account' in row[0] or any(month in ' '.join(row) for month in ['January', 'February', 'March'])):
-                    header_row_idx = i
-                    break
-
-            if header_row_idx == -1:
-                raise ValueError("Could not find header row with months")
+            # Use robust header detection
+            try:
+                header_row_idx, detection_method = self.detect_header_row(rows, "CSV")
+            except ValueError as e:
+                # Re-raise with file context
+                raise ValueError(f"Failed to parse Balance Sheet CSV: {str(e)}")
 
             # Parse header to get months
             header_row = rows[header_row_idx]
@@ -671,17 +766,12 @@ class BalanceSheetConverter(BaseConverter):
         for row in sheet.iter_rows(values_only=True):
             rows.append(list(row))
 
-        # Find the header row with months
-        header_row_idx = -1
-        for i, row in enumerate(rows):
-            if row and row[0] and ('Distribution account' in str(row[0]) or
-                                  any(month in ' '.join(str(cell) for cell in row if cell)
-                                      for month in ['January', 'February', 'March'])):
-                header_row_idx = i
-                break
-
-        if header_row_idx == -1:
-            raise ValueError("Could not find header row with months")
+        # Use robust header detection
+        try:
+            header_row_idx, detection_method = self.detect_header_row(rows, "XLSX")
+        except ValueError as e:
+            # Re-raise with file context
+            raise ValueError(f"Failed to parse Balance Sheet XLSX: {str(e)}")
 
         # Parse using the same logic as CSV
         months = []
