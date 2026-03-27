@@ -84,10 +84,13 @@ class CashFlowConverter(BaseConverter):
 
             # Find the header row with months
             header_row_idx = -1
+            full_months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+            abbr_months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+            
             for i, row in enumerate(rows):
                 if len(row) > 1 and (
                     'Full name' in row[0] or
-                    sum(1 for cell in row[1:] if cell and any(month in cell for month in ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August'])) >= 2
+                    sum(1 for cell in row[1:] if cell and (any(month in cell for month in full_months) or any(month in cell for month in abbr_months))) >= 2
                 ):
                     header_row_idx = i
                     break
@@ -548,10 +551,13 @@ class CashFlowConverter(BaseConverter):
 
         # Find the header row with months
         header_row_idx = -1
+        full_months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+        abbr_months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        
         for i, row in enumerate(rows):
             if row and len(row) > 1 and (
                 (row[0] and 'Full name' in str(row[0])) or
-                sum(1 for cell in row[1:] if cell and any(month in str(cell) for month in ['January', 'February', 'March', 'April', 'May', 'June', 'July'])) >= 2
+                sum(1 for cell in row[1:] if cell and (any(month in str(cell) for month in full_months) or any(month in str(cell) for month in abbr_months))) >= 2
             ):
                 header_row_idx = i
                 break

@@ -44,7 +44,38 @@ if [ -z "$QBTOJSON_API_KEY" ]; then
     exit 1
 fi
 
+# Load Anthropic API key from local .env or fallback to llmextractorapi .env
+if [ -z "$ANTHROPIC_API_KEY" ]; then
+    LLM_ENV_PATH="/Users/araboin/shepi/llmextractorapi/.env"
+    if [ -f "$LLM_ENV_PATH" ]; then
+        ANTHROPIC_API_KEY=$(grep '^ANTHROPIC_API_KEY=' "$LLM_ENV_PATH" | cut -d= -f2-)
+        export ANTHROPIC_API_KEY
+        if [ -n "$ANTHROPIC_API_KEY" ]; then
+            echo "✅ Loaded ANTHROPIC_API_KEY from $LLM_ENV_PATH"
+        fi
+    fi
+fi
+
+# Defaults for GL PDF LLM fallback
+ENABLE_LLM_GL_PDF_FALLBACK=${ENABLE_LLM_GL_PDF_FALLBACK:-true}
+GL_PDF_FORCE_LLM=${GL_PDF_FORCE_LLM:-true}
+GL_LLM_MODEL=${GL_LLM_MODEL:-claude-haiku-4-5-20251001}
+GL_LLM_MAX_ATTEMPTS=${GL_LLM_MAX_ATTEMPTS:-5}
+
+# Check if ANTHROPIC_API_KEY is set (required for PDF fallback)
+if [ -z "$ANTHROPIC_API_KEY" ]; then
+    echo "⚠️  Warning: ANTHROPIC_API_KEY not found. GL PDF LLM fallback will be disabled."
+    ENABLE_LLM_GL_PDF_FALLBACK=false
+fi
+
 echo "🔑 API Key loaded (length: ${#QBTOJSON_API_KEY})"
+if [ -n "$ANTHROPIC_API_KEY" ]; then
+echo "🤖 Anthropic key loaded (length: ${#ANTHROPIC_API_KEY})"
+fi
+echo "🤖 GL PDF fallback enabled: ${ENABLE_LLM_GL_PDF_FALLBACK}"
+echo "🤖 GL PDF force LLM: ${GL_PDF_FORCE_LLM}"
+echo "🤖 GL model: ${GL_LLM_MODEL}"
+echo "🤖 GL max attempts: ${GL_LLM_MAX_ATTEMPTS}"
 
 # Deploy to Cloud Run using Cloud Build
 echo ""
@@ -60,10 +91,11 @@ $GCLOUD run deploy ${SERVICE_NAME} \
   --cpu 2 \
   --concurrency 1 \
   --cpu-boost \
-  --timeout 300s \
+  --no-cpu-throttling \
+  --timeout 540s \
   --max-instances 50 \
-  --min-instances 0 \
-  --set-env-vars QBTOJSON_API_KEY="${QBTOJSON_API_KEY}"
+  --min-instances 2 \
+  --set-env-vars QBTOJSON_API_KEY="${QBTOJSON_API_KEY}",DB_PROXY_URL="${DB_PROXY_URL}",ENABLE_LLM_GL_PDF_FALLBACK="${ENABLE_LLM_GL_PDF_FALLBACK}",GL_PDF_FORCE_LLM="${GL_PDF_FORCE_LLM}",ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}",GL_LLM_MODEL="${GL_LLM_MODEL}",GL_LLM_MAX_ATTEMPTS="${GL_LLM_MAX_ATTEMPTS}"
 
 if [ $? -ne 0 ]; then
     echo "❌ Cloud Run deployment failed!"

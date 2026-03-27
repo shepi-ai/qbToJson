@@ -95,6 +95,64 @@ class CustomerConcentrationConverter(BaseConverter):
 
         return self.calculate_percentages(list(customer_map.values()))
 
+    def _parse_pivot_table(self, sheet) -> List[Dict[str, Any]]:
+        """Parse P&L by Customer pivot table format"""
+        customer_map = {}
+        
+        # Find the customer header row (contains all customer names)
+        customer_row_idx = None
+        customer_names = []
+        
+        for idx, row in enumerate(sheet.iter_rows(values_only=True), 1):
+            if not row or not row[0]:
+                continue
+            # Look for row with many non-empty cells (customer names)
+            non_empty = sum(1 for cell in row[1:] if cell and str(cell).strip())
+            if non_empty > 20:  # Pivot table has 30+ customer columns (Q1 reports have fewer)
+                customer_row_idx = idx
+                customer_names = [str(cell).strip() if cell else None for cell in row]
+                print(f"[CUSTOMER-CONC] Found customer header row at {idx} with {non_empty} customers")
+                break
+        
+        if not customer_row_idx:
+            raise ValueError("Could not find customer header row in pivot table")
+        
+        # Find "Total Income" row or similar
+        total_income_row = None
+        for idx, row in enumerate(sheet.iter_rows(min_row=customer_row_idx + 1, values_only=True), customer_row_idx + 1):
+            if not row or not row[0]:
+                continue
+            first_cell = str(row[0]).strip().lower()
+            if 'total income' in first_cell or first_cell == 'income':
+                total_income_row = idx
+                print(f"[CUSTOMER-CONC] Found Total Income row at {idx}")
+                break
+        
+        if not total_income_row:
+            raise ValueError("Could not find Total Income row in pivot table")
+        
+        # Extract values from Total Income row
+        income_row = list(sheet.iter_rows(min_row=total_income_row, max_row=total_income_row, values_only=True))[0]
+        
+        # Map customer names to their sales values
+        for col_idx, customer_name in enumerate(customer_names):
+            if not customer_name or customer_name.upper() in ['TOTAL', 'NOT SPECIFIED']:
+                continue
+            
+            if col_idx < len(income_row):
+                value = income_row[col_idx]
+                if value is not None:
+                    revenue = self.parse_amount(str(value))
+                    if revenue > 0:  # Only include customers with sales
+                        customer_map[customer_name] = {
+                            'customerName': customer_name,
+                            'revenue': revenue,
+                            'percentage': 0.0
+                        }
+        
+        print(f"[CUSTOMER-CONC] Extracted {len(customer_map)} customers with sales from pivot table")
+        return self.calculate_percentages(list(customer_map.values()))
+
     def _sum_row_values(self, row, value_col_indices: List[int]) -> float:
         """Sum all numeric values across the given column indices for a row"""
         total = 0.0
@@ -111,6 +169,12 @@ class CustomerConcentrationConverter(BaseConverter):
 
         workbook = openpyxl.load_workbook(filepath, data_only=True)
         sheet = workbook.active
+
+        # Check if this is a P&L by Customer pivot table (many columns)
+        max_col = sheet.max_column
+        if max_col > 30:  # Pivot tables have 50+ columns (2025 Q1 has fewer)
+            print(f"[CUSTOMER-CONC] Detected pivot table format ({max_col} columns)")
+            return self._parse_pivot_table(sheet)
 
         # Find header row - look for row where first cell is exactly "Customer"
         header_row = None

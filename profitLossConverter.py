@@ -125,11 +125,15 @@ class ProfitLossConverter(BaseConverter):
 
             # Find the header row with months
             header_row_idx = -1
+            full_months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+            abbr_months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+            
             for i, row in enumerate(rows):
                 if len(row) > 1:  # Must have at least 2 columns
-                    # Check each cell for month names
+                    # Check each cell for month names (full or abbreviated)
                     for cell in row[1:]:  # Skip first column
-                        if cell and any(month in str(cell) for month in ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']):
+                        cell_str = str(cell).strip()
+                        if cell_str and (any(month in cell_str for month in full_months) or any(month in cell_str for month in abbr_months)):
                             header_row_idx = i
                             break
                     if header_row_idx != -1:
@@ -598,11 +602,15 @@ class ProfitLossConverter(BaseConverter):
 
         # Find the header row with months
         header_row_idx = -1
+        full_months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+        abbr_months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        
         for i, row in enumerate(rows):
             if len(row) > 1:  # Must have at least 2 columns
-                # Check each cell for month names
+                # Check each cell for month names (full or abbreviated)
                 for cell in row[1:]:  # Skip first column
-                    if cell and any(month in str(cell) for month in ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']):
+                    cell_str = str(cell).strip()
+                    if cell_str and (any(month in cell_str for month in full_months) or any(month in cell_str for month in abbr_months)):
                         header_row_idx = i
                         break
                 if header_row_idx != -1:

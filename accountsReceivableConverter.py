@@ -264,7 +264,10 @@ class AccountsReceivableConverter(BaseConverter):
 
         header_row = None
         for idx, row in enumerate(sheet.iter_rows(values_only=True), 1):
-            if row and any('Customer' in str(cell) for cell in row if cell):
+            # Look for aging bucket headers: Current, 1-30, 31-60, etc.
+            row_str = ' '.join(str(cell) for cell in row if cell)
+            if ('Current' in row_str and 'Total' in row_str) or \
+               ('1' in row_str and '30' in row_str and '60' in row_str):
                 header_row = idx
                 break
 

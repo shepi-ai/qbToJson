@@ -7,6 +7,7 @@ Provides functionality to look up account IDs from the API
 import requests
 from typing import Optional, Dict, Any
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -14,11 +15,18 @@ logger = logging.getLogger(__name__)
 class AccountLookupClient:
     """Client for looking up account IDs from the API"""
     
-    def __init__(self, api_base_url: str = None):
+    def __init__(self, api_base_url: str = None, api_key: Optional[str] = None):
         if api_base_url is None:
             api_base_url = "http://localhost:8080"
         self.api_base_url = api_base_url.rstrip('/')
+        self.api_key = api_key or os.getenv("QBTOJSON_API_KEY")
         self.cache = {}  # Local cache to avoid repeated API calls
+
+    def _auth_headers(self) -> Dict[str, str]:
+        """Build auth headers for protected API endpoints."""
+        if self.api_key:
+            return {"x-api-key": self.api_key}
+        return {}
         
     def lookup_account_id(self, account_name: str) -> Optional[str]:
         """
@@ -43,6 +51,7 @@ class AccountLookupClient:
             response = requests.post(
                 f"{self.api_base_url}/api/accounts/lookup",
                 json={"name": account_name},
+                headers=self._auth_headers(),
                 timeout=5
             )
             
@@ -86,6 +95,7 @@ class AccountLookupClient:
                 response = requests.post(
                     f"{self.api_base_url}/api/accounts/load",
                     files=files,
+                    headers=self._auth_headers(),
                     timeout=30
                 )
                 
@@ -116,9 +126,17 @@ class AccountLookupClient:
 # Singleton instance
 _client_instance = None
 
-def get_account_lookup_client(api_base_url: Optional[str] = None) -> AccountLookupClient:
+def get_account_lookup_client(api_base_url: Optional[str] = None, api_key: Optional[str] = None) -> AccountLookupClient:
     """Get or create the singleton account lookup client"""
     global _client_instance
-    if _client_instance is None or (api_base_url and api_base_url != _client_instance.api_base_url):
-        _client_instance = AccountLookupClient(api_base_url or "http://localhost:8080")
+    should_replace = (
+        _client_instance is None
+        or (api_base_url and api_base_url != _client_instance.api_base_url)
+        or (api_key and api_key != _client_instance.api_key)
+    )
+    if should_replace:
+        _client_instance = AccountLookupClient(
+            api_base_url or "http://localhost:8080",
+            api_key=api_key,
+        )
     return _client_instance

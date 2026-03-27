@@ -1,0 +1,173 @@
+{
+  "success": [
+    {
+      "file": "7 - P&L by month 2022-24.xlsx",
+      "folder": "7 - P&L by Month",
+      "endpoint": "profit-loss",
+      "record_count": 36
+    },
+    {
+      "file": "7 - P&L 2025 Jan-Feb.xlsx",
+      "folder": "7 - P&L by Month",
+      "endpoint": "profit-loss",
+      "record_count": 2
+    },
+    {
+      "file": "7 - Sales 2025 Jan-Mar.xlsx",
+      "folder": "7 - P&L by Month",
+      "endpoint": "profit-loss",
+      "record_count": 3
+    },
+    {
+      "file": "9 - Balance Sheet 2022 by month.xlsx",
+      "folder": "9 - Balance Sheet by Month",
+      "endpoint": "balance-sheet",
+      "record_count": 12
+    },
+    {
+      "file": "9 - Balance Sheet 2025 by month.xlsx",
+      "folder": "9 - Balance Sheet by Month",
+      "endpoint": "balance-sheet",
+      "record_count": 2
+    },
+    {
+      "file": "9 - Balance Sheet 2024 by month.xlsx",
+      "folder": "9 - Balance Sheet by Month",
+      "endpoint": "balance-sheet",
+      "record_count": 12
+    },
+    {
+      "file": "9 - Balance Sheet 2023 by month.xlsx",
+      "folder": "9 - Balance Sheet by Month",
+      "endpoint": "balance-sheet",
+      "record_count": 12
+    },
+    {
+      "file": "11 - General Ledger report Jan-Feb 2025.xlsx",
+      "folder": "11 - General Ledger",
+      "endpoint": "general-ledger",
+      "record_count": 0
+    },
+    {
+      "file": "11 - General Ledger report.xlsx",
+      "folder": "11 - General Ledger",
+      "endpoint": "general-ledger",
+      "record_count": 0
+    },
+    {
+      "file": "12 - Statement of Cash Flow by month 2022-24.xlsx",
+      "folder": "12 - Cash Flow",
+      "endpoint": "cash-flow",
+      "record_count": 36
+    },
+    {
+      "file": "12 - Statement of Cash Flow by month 2025.xlsx",
+      "folder": "12 - Cash Flow",
+      "endpoint": "cash-flow",
+      "record_count": 2
+    },
+    {
+      "file": "22 - AR Aging 12-31-22.xlsx",
+      "folder": "22 - AR Aging",
+      "endpoint": "accounts-receivable",
+      "record_count": 3
+    },
+    {
+      "file": "22 - AR Aging 12-31-23.xlsx",
+      "folder": "22 - AR Aging",
+      "endpoint": "accounts-receivable",
+      "record_count": 3
+    },
+    {
+      "file": "A-R Aging 12-31-24.xlsx",
+      "folder": "22 - AR Aging",
+      "endpoint": "accounts-receivable",
+      "record_count": 3
+    },
+    {
+      "file": "22 - A-R Aging 02-28-25.xlsx",
+      "folder": "22 - AR Aging",
+      "endpoint": "accounts-receivable",
+      "record_count": 3
+    },
+    {
+      "file": "A-R Aging 01-01-25.xlsx",
+      "folder": "22 - AR Aging",
+      "endpoint": "accounts-receivable",
+      "record_count": 3
+    },
+    {
+      "file": "25 - AP Aging 02-28-25.xlsx",
+      "folder": "25 - AP Aging",
+      "endpoint": "accounts-payable",
+      "record_count": 3
+    },
+    {
+      "file": "25 - AP Aging 12-31-23.xlsx",
+      "folder": "25 - AP Aging",
+      "endpoint": "accounts-payable",
+      "record_count": 3
+    },
+    {
+      "file": "25 - AP Aging 12-31-22.xlsx",
+      "folder": "25 - AP Aging",
+      "endpoint": "accounts-payable",
+      "record_count": 3
+    },
+    {
+      "file": "25 - AP Aging 12-31-24.xlsx",
+      "folder": "25 - AP Aging",
+      "endpoint": "accounts-payable",
+      "record_count": 3
+    },
+    {
+      "file": "8 - Sales by customer 2025.xlsx",
+      "folder": "27 - Sales by Customer",
+      "endpoint": "customer-concentration",
+      "record_count": 33
+    },
+    {
+      "file": "2025 Q1 Sales by Customer (1)(1).xlsx",
+      "folder": "27 - Sales by Customer",
+      "endpoint": "customer-concentration",
+      "record_count": 47
+    },
+    {
+      "file": "8 - Sales by customer 2024.xlsx",
+      "folder": "27 - Sales by Customer",
+      "endpoint": "customer-concentration",
+      "record_count": 169
+    },
+    {
+      "file": "8 - Sales by customer 2023.xlsx",
+      "folder": "27 - Sales by Customer",
+      "endpoint": "customer-concentration",
+      "record_count": 165
+    },
+    {
+      "file": "8 - Sales by customer 2022.xlsx",
+      "folder": "27 - Sales by Customer",
+      "endpoint": "customer-concentration",
+      "record_count": 181
+    },
+    {
+      "file": "2025 Q1 Sales by Customer (1).xlsx",
+      "folder": "27 - Sales by Customer",
+      "endpoint": "customer-concentration",
+      "record_count": 47
+    }
+  ],
+  "failed": [
+    {
+      "file": "10 - Balance Sheet 2024 year end.xlsx",
+      "folder": "10 - Balance Sheet Detail",
+      "endpoint": "balance-sheet",
+      "error": "HTTP 500",
+      "details": "{\"details\":\"Failed to parse Balance Sheet XLSX: Could not find header row with months. The file may not be a Balance Sheet by Month report, or it uses an unsupported format. Expected format: A header "
+    }
+  ],
+  "skipped": [],
+  "total_files": 27,
+  "start_time": "2026-03-10T08:59:25.235703",
+  "end_time": "2026-03-10T08:59:28.287290"
+}
