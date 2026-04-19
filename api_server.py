@@ -867,16 +867,11 @@ def convert_from_storage_helper(converter_class, data_type, file_path, project_i
         converter = converter_class()
         result = converter.convert_file(tmp_path)
         
-        # Save to database
-        save_success = db_client.save_converted_data(
-            project_id=project_id,
-            data_type=data_type,
-            data=result,
-            source_document_id=source_document_id,
-            filename=file_path.split('/')[-1]
-        )
+        # NOTE: Database save removed to prevent duplicates
+        # Edge function (process-quickbooks-file) handles all DB writes
+        # This endpoint is now a pure converter - returns data only
         
-        return result, save_success
+        return result, False  # False = not saved (edge function will save)
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
