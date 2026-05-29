@@ -115,6 +115,27 @@ class DatabaseClient:
             logger.error(f"Error checking COA existence: {e}")
             return False
 
+    def get_processed_data(self, project_id: str, data_type: str, limit: int = 1) -> list:
+        """Fetch processed_data rows for a project/type, most recent first."""
+        if not self.is_configured():
+            logger.warning("Cannot fetch processed_data: SUPABASE_SERVICE_ROLE_KEY not configured")
+            return []
+
+        try:
+            result = (
+                self.client.table("processed_data")
+                .select("*")
+                .eq("project_id", project_id)
+                .eq("data_type", data_type)
+                .order("created_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            return result.data or []
+        except Exception as e:
+            logger.error(f"Error fetching processed_data ({data_type}): {e}")
+            return []
+
     def download_from_storage(self, file_path: str, bucket: str = "documents") -> bytes:
         """Download a file from Supabase Storage."""
         if not self.is_configured():
