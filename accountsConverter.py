@@ -94,6 +94,22 @@ class AccountsConverter(BaseConverter):
         else:
             return 'EXPENSE'
 
+    # QuickBooks emits a fixed, closed set of account types, whereas account
+    # *names* are freeform. So we recognise real accounts by their Type, not by
+    # blocklisting names: report decoration (title, company name, the TOTAL row,
+    # the "Accrual Basis ... GMTZ" footer) has an empty Type, while every real
+    # account -- however oddly named -- has one of these.
+    ACCOUNT_TYPE_TOKENS = (
+        'accounts payable', 'a/p', 'accounts receivable', 'a/r', 'bank',
+        'checking', 'savings', 'credit card', 'cost of goods sold', 'cogs',
+        'equity', 'expense', 'income', 'asset', 'liabilit',
+    )
+
+    def is_known_account_type(self, type_str: str) -> bool:
+        """True if the Type cell names a real QuickBooks account type."""
+        t = (type_str or '').strip().lower()
+        return bool(t) and any(tok in t for tok in self.ACCOUNT_TYPE_TOKENS)
+
     def create_account_object(self, name: str, type_str: str, detail_type: str,
                               description: Optional[str] = None,
                               balance: float = 0.0,
@@ -212,16 +228,16 @@ class AccountsConverter(BaseConverter):
                 skipped_count += 1
                 continue
 
-            if full_name == 'TOTAL':
-                skipped_count += 1
-                continue
-
-            if any(keyword in full_name.lower() for keyword in ['basis', 'gmtz', 'accrual', 'cash']):
-                skipped_count += 1
-                continue
-
             type_str = (row.get('Type') or row.get('TYPE') or
                         row.get('Account Type') or '').strip()
+
+            # Keep only real accounts (identified by a recognised Type). Report
+            # decoration -- the TOTAL row and the "Accrual Basis ... GMTZ" footer --
+            # has no Type and is skipped, without blocklisting freeform names.
+            if not self.is_known_account_type(type_str):
+                skipped_count += 1
+                continue
+
             detail_type = (row.get('Detail type') or row.get('Detail Type') or
                            row.get('DETAIL TYPE') or row.get('Sub Type') or '').strip()
             description = (row.get('Description') or row.get('DESCRIPTION') or '').strip()
@@ -283,10 +299,11 @@ class AccountsConverter(BaseConverter):
                 continue
 
             name = str(row[col_map.get('Full name', 0)])
-            if name == 'TOTAL':
-                continue
+            type_str = str(row[col_map.get('Type', 1)] or '').strip()
 
-            if any(keyword in name.lower() for keyword in ['basis', 'gmtz', 'accrual', 'cash']):
+            # Keep only real accounts (recognised Type); the TOTAL row and the
+            # "Accrual Basis ... GMTZ" footer have no Type and are skipped.
+            if not self.is_known_account_type(type_str):
                 continue
 
             balance_str = str(row[col_map.get('Total balance', 4)] or '0')
@@ -304,7 +321,7 @@ class AccountsConverter(BaseConverter):
 
             account = self.create_account_object(
                 name=name,
-                type_str=row[col_map.get('Type', 1)] or '',
+                type_str=type_str,
                 detail_type=row[col_map.get('Detail type', 2)] or '',
                 description=row[col_map.get('Description', 3)],
                 balance=balance,
@@ -375,13 +392,10 @@ class AccountsConverter(BaseConverter):
             if pending is None:
                 return
             name = pending['name'].strip()
-            # Apply the same report-furniture filter used by parse_csv / parse_xlsx
-            # so all three sources reconcile to an identical account set.
-            is_furniture = any(
-                keyword in name.lower()
-                for keyword in ['basis', 'gmtz', 'accrual', 'cash']
-            )
-            if name and name.upper() != 'TOTAL' and not is_furniture:
+            # Keep only real accounts (recognised Type), matching parse_csv /
+            # parse_xlsx. Report decoration (title, company, TOTAL, the
+            # "Accrual Basis ... GMTZ" footer) has no Type and is dropped.
+            if name and self.is_known_account_type(pending['type']):
                 parent_id = None
                 if ':' in name:
                     parent_name = name.rsplit(':', 1)[0]
