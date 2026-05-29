@@ -104,15 +104,21 @@ class TrialBalanceConverter(BaseConverter):
             reader = csv.reader(f)
             rows = list(reader)
 
-            # Find header row with months
+            # Find header row with months. Match cells that look like a month-year
+            # column header (e.g. "January 2023"); this deliberately skips the
+            # "As of December 31, 2025" title line, where the month is followed by a
+            # day rather than a 4-digit year, which would otherwise be picked as the
+            # header and yield zero month columns.
+            month_year_re = re.compile(
+                r'(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+\d{4}'
+            )
             header_row_idx = -1
             for i, row in enumerate(rows):
-                if len(row) > 1:
-                    # Look for row with month names
-                    row_text = ' '.join(str(cell) for cell in row if cell)
-                    if any(month in row_text.upper() for month in ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER']):
-                        header_row_idx = i
-                        break
+                if len(row) > 1 and any(
+                    cell and month_year_re.search(str(cell).upper()) for cell in row
+                ):
+                    header_row_idx = i
+                    break
 
             if header_row_idx == -1:
                 raise ValueError("Could not find header row with months")
@@ -125,7 +131,7 @@ class TrialBalanceConverter(BaseConverter):
             col_idx = 1  # Skip first column (account names)
             while col_idx < len(header_row):
                 cell = header_row[col_idx]
-                if cell and any(month in cell.upper() for month in ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY']):
+                if cell and month_year_re.search(cell.upper()):
                     month, year, start_date, end_date = self.parse_month_year(cell)
                     month_columns.append({
                         'month': month,
