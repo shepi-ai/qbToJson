@@ -170,12 +170,6 @@ class CustomerConcentrationConverter(BaseConverter):
         workbook = openpyxl.load_workbook(filepath, data_only=True)
         sheet = workbook.active
 
-        # Check if this is a P&L by Customer pivot table (many columns)
-        max_col = sheet.max_column
-        if max_col > 30:  # Pivot tables have 50+ columns (2025 Q1 has fewer)
-            print(f"[CUSTOMER-CONC] Detected pivot table format ({max_col} columns)")
-            return self._parse_pivot_table(sheet)
-
         # Find header row - look for row where first cell is exactly "Customer"
         header_row = None
         for idx, row in enumerate(sheet.iter_rows(values_only=True), 1):
@@ -190,7 +184,14 @@ class CustomerConcentrationConverter(BaseConverter):
                     header_row = idx
                     break
 
+        # A standard Sales by Customer Summary lists customers down rows under a
+        # "Customer" header; a wide column count just means the report spans many
+        # months. Only when there is NO "Customer" header row do we treat the sheet
+        # as a P&L by Customer pivot, where customers run across the columns.
         if not header_row:
+            if sheet.max_column > 30:
+                print(f"[CUSTOMER-CONC] No 'Customer' header row; treating as pivot table ({sheet.max_column} columns)")
+                return self._parse_pivot_table(sheet)
             raise ValueError("Could not find header row in XLSX file")
 
         headers = list(sheet.iter_rows(min_row=header_row, max_row=header_row, values_only=True))[0]
@@ -219,7 +220,14 @@ class CustomerConcentrationConverter(BaseConverter):
             if 'Sandbox Company' in customer_name or 'Sales by Customer' in customer_name:
                 continue
 
-            if any(month in customer_name for month in ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']):
+            # Skip rows that are month-column headers (e.g. "May" or "May 2024"),
+            # but NOT real customers whose name merely contains a month substring
+            # (e.g. "Mayert-Lehner", "Marchetti").
+            if re.fullmatch(
+                r'(January|February|March|April|May|June|July|August|September|October|November|December)(\s+\d{4})?',
+                customer_name,
+                re.IGNORECASE,
+            ):
                 continue
 
             if customer_name.upper() == 'TOTAL':
@@ -259,92 +267,118 @@ class CustomerConcentrationConverter(BaseConverter):
 
         return self.calculate_percentages(list(customer_map.values()))
 
-    def parse_pdf(self, filepath: Path) -> List[Dict[str, Any]]:
-        """Parse PDF file and convert to simplified JSON array format"""
-        self.check_pdf_support()
+    # Table extraction settings: QB PDF reports draw no cell borders, so rely on
+    # text alignment to recover columns.
+    _PDF_TABLE_SETTINGS = {"vertical_strategy": "text", "horizontal_strategy": "text"}
 
-        customer_map = {}
+    @staticmethod
+    def _row_has_amount(cells: List[str]) -> bool:
+        """True if any non-name cell contains a digit (a monetary value)."""
+        return any(re.search(r'\d', c) for c in cells[1:])
 
-        print("[CUSTOMER-CONC-PARSER] Starting PDF parse")
+    def _row_total(self, cells: List[str]) -> float:
+        """Grand-total value for a row = the last (TOTAL) column."""
+        last = cells[-1]
+        return self.parse_amount(last) if last and last != '-' else 0.0
 
+    def _gather_pdf_total_rows(self, filepath: Path) -> List[List[str]]:
+        """Collect data rows from the report's grand-total section.
+
+        Works for both the single-column "summary" PDF and the multi-page
+        "monthly" PDF: the latter repeats every customer once per month-group,
+        but only the final group's header ends in a TOTAL column, so we keep
+        rows only while that grand-total column is active.
+        """
+        rows: List[List[str]] = []
+        active = False
         with pdfplumber.open(filepath) as pdf:
             for page in pdf.pages:
-                text = page.extract_text()
-                if not text:
-                    continue
-
-                lines = text.split('\n')
-                print(f"[CUSTOMER-CONC-PARSER] Page has {len(lines)} lines")
-
-                header_idx = -1
-                for i, line in enumerate(lines):
-                    if 'CUSTOMER' in line.upper() and 'TOTAL' in line.upper():
-                        header_idx = i
-                        print(f"[CUSTOMER-CONC-PARSER] Found header at line {i}")
-                        break
-
-                if header_idx == -1:
-                    continue
-
-                current_parent = None
-
-                for line in lines[header_idx + 1:]:
-                    original_line = line
-                    is_indented = line and line[0] == ' '
-
-                    line = line.strip()
-                    if not line:
+                for raw in (page.extract_table(self._PDF_TABLE_SETTINGS) or []):
+                    cells = [(c or "").strip() for c in raw]
+                    if not any(cells):
                         continue
-
-                    if line.upper().startswith('TOTAL') and not line.startswith('Total for'):
-                        print(f"[CUSTOMER-CONC-PARSER] Found TOTAL line, stopping parse")
-                        break
-
-                    if line.startswith('Total for '):
-                        parent_name = line.replace('Total for ', '').split()[0:3]
-                        parent_name = ' '.join(parent_name)
-                        amounts = re.findall(r'[\d,]+\.\d{2}', line)
-                        if amounts and parent_name in customer_map:
-                            total = self.parse_amount(amounts[-1])
-                            customer_map[parent_name]['revenue'] = total
-                            print(f"[CUSTOMER-CONC-PARSER] Updated parent '{parent_name}' total: ${total}")
-                        current_parent = None
+                    name = cells[0]
+                    if name.upper().startswith("CUSTOMER"):
+                        non_empty = [c for c in cells if c]
+                        active = bool(non_empty) and non_empty[-1].upper() == "TOTAL"
                         continue
-
-                    amounts = re.findall(r'-?[\d,]+\.\d{2}', line)
-
-                    if not amounts:
-                        if not is_indented:
-                            current_parent = line.strip()
-                            customer_map[current_parent] = {
-                                'customerName': current_parent,
-                                'revenue': 0.0,
-                                'percentage': 0.0
-                            }
-                            print(f"[CUSTOMER-CONC-PARSER] Starting parent customer: {current_parent}")
+                    if not active or not name:
                         continue
+                    # Skip report furniture: footers and the "2023 2024 ..." year sub-header.
+                    if 'Accrual Basis' in name or 'GMTZ' in name or re.fullmatch(r'(\d{4} ?)+', name):
+                        continue
+                    rows.append(cells)
+        return rows
 
-                    customer_line = line
-                    for amt in amounts:
-                        customer_line = customer_line.replace(amt, '', 1)
-                    customer_name = customer_line.strip()
+    def parse_pdf(self, filepath: Path) -> List[Dict[str, Any]]:
+        """Parse PDF file and convert to simplified JSON array format.
 
-                    total = self.parse_amount(amounts[-1])
+        QB wraps long customer names and "Total for" labels onto a second line,
+        which the table extractor returns as a separate amount-less row. We
+        disambiguate such rows: a parent header is the only one followed by a
+        "Total for" line (its children's amounts roll up to it); any other
+        amount-less row is the wrapped tail of the row above it.
+        """
+        self.check_pdf_support()
 
-                    if current_parent:
-                        customer_map[current_parent]['revenue'] += total
-                        print(f"[CUSTOMER-CONC-PARSER] Added sub-customer to '{current_parent}': {customer_name} (${total})")
-                    else:
-                        if customer_name and customer_name not in customer_map:
-                            customer_map[customer_name] = {
-                                'customerName': customer_name,
-                                'revenue': total,
-                                'percentage': 0.0
-                            }
-                            print(f"[CUSTOMER-CONC-PARSER] Added customer: {customer_name} (${total})")
+        rows = self._gather_pdf_total_rows(filepath)
+        customer_map: Dict[str, Dict[str, Any]] = {}
+        parent = None        # current parent customer accumulating sub-customer sales
+        last_key = None       # most recent standalone customer (for name-wrap continuation)
+        after_total_for = False
+
+        def looks_like_parent(i: int) -> bool:
+            # A parent is followed by its children (amount rows) and then a
+            # "Total for" line, before any other amount-less row appears.
+            for j in range(i + 1, len(rows)):
+                if rows[j][0].startswith("Total for"):
+                    return True
+                if not self._row_has_amount(rows[j]):
+                    return False
+            return False
+
+        for i, cells in enumerate(rows):
+            name = cells[0]
+
+            if name.startswith("Total for"):
+                if parent and parent in customer_map:
+                    customer_map[parent]['revenue'] = self._row_total(cells)
+                parent = None
+                last_key = None
+                after_total_for = True
+                continue
+
+            if name.upper() == "TOTAL":      # grand total line
+                after_total_for = False
+                continue
+
+            if self._row_has_amount(cells):
+                total = self._row_total(cells)
+                if parent and parent in customer_map:
+                    customer_map[parent]['revenue'] += total
+                    last_key = None
+                else:
+                    customer_map[name] = {'customerName': name, 'revenue': total, 'percentage': 0.0}
+                    last_key = name
+                after_total_for = False
+                continue
+
+            # Amount-less row: parent header, label wrap, or name wrap.
+            if looks_like_parent(i):
+                parent = name
+                customer_map.setdefault(name, {'customerName': name, 'revenue': 0.0, 'percentage': 0.0})
+                last_key = name
+            elif after_total_for:
+                pass                          # wrapped tail of the "Total for X" label
+            elif last_key and last_key in customer_map:
+                merged = f"{last_key} {name}".strip()   # wrapped tail of previous customer name
+                entry = customer_map.pop(last_key)
+                entry['customerName'] = merged
+                customer_map[merged] = entry
+                last_key = merged
+            after_total_for = False
 
         print(f"[CUSTOMER-CONC-PARSER] Parsed {len(customer_map)} customers")
-
         return self.calculate_percentages(list(customer_map.values()))
 
 
