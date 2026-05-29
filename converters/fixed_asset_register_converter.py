@@ -156,12 +156,18 @@ class FixedAssetRegisterConverter(BaseConverter):
         disp_amt_col = find_col('Disposal Amount', 'Proceeds', 'Sale Price')
 
         for row in sheet.iter_rows(min_row=header_row + 1, values_only=True):
+            # The asset register ends at the TOTAL row; anything after it (e.g. a
+            # trailing "Depreciation by ..." schedule) is not a fixed asset. Check
+            # the first column, since the TOTAL label sits there rather than in the
+            # asset-name column.
+            first_cell = str(row[0]).strip() if row and row[0] is not None else ''
+            if first_cell.upper() in ('TOTAL', 'GRAND TOTAL') or first_cell.lower().startswith('depreciation'):
+                break
+
             if not row or not row[asset_col]:
                 continue
 
             asset_name = str(row[asset_col]).strip()
-            if asset_name.upper() in ('TOTAL', 'GRAND TOTAL'):
-                continue
 
             acquisition_cost = self.parse_amount(row[cost_col]) if cost_col is not None else 0.0
             accum_depreciation = self.parse_amount(row[accum_col]) if accum_col is not None else 0.0
