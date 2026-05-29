@@ -876,164 +876,289 @@ class BalanceSheetConverter(BaseConverter):
 
         return self.build_balance_sheet_json(months, data_by_month)
 
+    # ----- PDF parsing -------------------------------------------------------
+    #
+    # QuickBooks multi-month "Balance Sheet" PDFs draw no cell borders and split
+    # the 36 monthly columns across several pages (a "page-group" per subset of
+    # months). The SAME accounts repeat on every page, so we must STITCH the
+    # month columns together by matching accounts across pages.
+    #
+    # Reading the page with the table extractor smears amounts together, so we
+    # read individual words with their x-coordinates instead. Amounts are
+    # right-aligned under each month's header, so each amount is assigned to the
+    # month column whose right edge (the year word's x1) its own right edge sits
+    # closest to. Account names that wrap onto two words are joined; the row's
+    # top-coordinate groups words into a single logical row.
+
+    _PDF_AMOUNT_RE = re.compile(r'-?\$?\(?[\d,]+\.\d{2}\)?$')
+    _PDF_MONTHS = {
+        'JANUARY': 1, 'FEBRUARY': 2, 'MARCH': 3, 'APRIL': 4, 'MAY': 5, 'JUNE': 6,
+        'JULY': 7, 'AUGUST': 8, 'SEPTEMBER': 9, 'OCTOBER': 10, 'NOVEMBER': 11,
+        'DECEMBER': 12,
+    }
+
+    @classmethod
+    def _pdf_parse_amount(cls, text: str) -> float:
+        """Parse a right-aligned monetary token. Handles ($1,234.00) negatives."""
+        t = text.strip().replace('$', '').replace(',', '')
+        neg = t.startswith('(') and t.endswith(')')
+        t = t.strip('()')
+        try:
+            value = float(t)
+        except ValueError:
+            return 0.0
+        return -value if neg else value
+
+    def _extract_pdf_page_columns(self, page) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Read one PDF page into (month_columns, account_rows).
+
+        ``month_columns`` describe each month visible on the page with the right
+        edge (``x1``) of its header used for amount snapping. ``account_rows``
+        are ``{"name": str, "values": {col_index: float}}`` keyed by the page's
+        local month-column index.
+        """
+        grouped: Dict[int, List[Dict[str, Any]]] = {}
+        for w in page.extract_words():
+            grouped.setdefault(round(w['top']), []).append(w)
+
+        # Locate the header row ("DISTRIBUTION ACCOUNT JANUARY 2023 ...").
+        header_top = None
+        for top in sorted(grouped):
+            text = ' '.join(w['text'] for w in grouped[top]).upper()
+            if 'DISTRIBUTION' in text and 'ACCOUNT' in text and any(m in text for m in self._PDF_MONTHS):
+                header_top = top
+                break
+        if header_top is None:
+            return [], []
+
+        # Build month columns from the header. Each month is a MONTHNAME word
+        # immediately followed by a 4-digit year word; the year's right edge
+        # (x1) is the column's right edge (amounts right-align to it).
+        header_words = sorted(grouped[header_top], key=lambda w: w['x0'])
+        month_columns: List[Dict[str, Any]] = []
+        for i, w in enumerate(header_words):
+            name = w['text'].upper()
+            if name in self._PDF_MONTHS and i + 1 < len(header_words):
+                year_word = header_words[i + 1]
+                if re.fullmatch(r'\d{4}', year_word['text']):
+                    month_num = self._PDF_MONTHS[name]
+                    year = int(year_word['text'])
+                    start_date = date(year, month_num, 1)
+                    end_date = date(year, month_num, calendar.monthrange(year, month_num)[1])
+                    month_columns.append({
+                        'month': f"{year}-{month_num:02d}",
+                        'start_date': start_date,
+                        'end_date': end_date,
+                        'x1': year_word['x1'],
+                    })
+
+        if not month_columns:
+            return [], []
+
+        def col_for_x1(x1: float) -> int:
+            return min(range(len(month_columns)),
+                       key=lambda i: abs(month_columns[i]['x1'] - x1))
+
+        account_rows: List[Dict[str, Any]] = []
+        for top in sorted(grouped):
+            if top <= header_top:
+                continue
+            words = sorted(grouped[top], key=lambda w: w['x0'])
+            name_parts: List[str] = []
+            values: Dict[int, float] = {}
+            for w in words:
+                text = w['text']
+                if self._PDF_AMOUNT_RE.fullmatch(text):
+                    values[col_for_x1(w['x1'])] = self._pdf_parse_amount(text)
+                else:
+                    name_parts.append(text)
+            name = ' '.join(name_parts).strip()
+
+            # Skip report furniture: page footer (date + GMTZ + "1/5") and the
+            # page-number-only line.
+            if not name and not values:
+                continue
+            if 'GMTZ' in name or 'Accrual Basis' in name:
+                continue
+            if not name and values:
+                continue
+            if re.fullmatch(r'\d+/\d+', name):
+                continue
+
+            account_rows.append({'name': name, 'values': values})
+
+        return month_columns, account_rows
+
     def parse_pdf(self, filepath: Path) -> List[Dict[str, Any]]:
-        """Parse PDF file and convert to balance sheet JSON"""
+        """Parse a multi-month Balance Sheet PDF and convert to balance sheet JSON.
+
+        Stitches month columns across page-groups by matching accounts, then
+        feeds the assembled rows through the SAME hierarchy logic used by the
+        CSV/XLSX parsers so the output shape is byte-for-byte compatible.
+        """
         if not PDF_SUPPORT:
             raise ImportError("pdfplumber is required for PDF support. Install with: pip install pdfplumber")
 
+        # Per-page extraction. Each page contributes a disjoint set of months
+        # (in chronological order) and repeats every account row.
+        all_month_columns: List[Dict[str, Any]] = []   # global ordered month list
+        # account_values[account_name] = {global_month_index: value}
+        account_order: List[str] = []
+        account_values: Dict[str, Dict[int, float]] = {}
+        # Section context is derived once from the row stream; identical across
+        # pages, so we record it from the first page that yields rows.
+
+        # We re-create the canonical row ordering (account_name -> section path)
+        # from the first page, then attach all months. To stay faithful to the
+        # CSV loop we will rebuild a synthetic "rows" table and run that loop.
+        page_results = []
         with pdfplumber.open(filepath) as pdf:
-            # Extract text from all pages
-            all_text = ""
             for page in pdf.pages:
-                text = page.extract_text()
-                if text:
-                    all_text += text + "\n"
+                cols, rows = self._extract_pdf_page_columns(page)
+                if cols:
+                    page_results.append((cols, rows))
 
-            # Split into lines for processing
-            lines = all_text.split('\n')
+        if not page_results:
+            raise ValueError("Could not find header row with months in PDF")
 
-            # Find header line with months
-            header_idx = -1
-            for i, line in enumerate(lines):
-                # Look for line that contains month names (case insensitive)
-                line_upper = line.upper()
-                if any(month in line_upper for month in ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY']):
-                    # Verify it's likely a header by checking for multiple months
-                    month_count = sum(1 for month in ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY'] if month in line_upper)
-                    if month_count >= 2:
-                        header_idx = i
-                        break
+        # Assemble the global month ordering and a per-account map of values.
+        month_offset = 0
+        canonical_rows: List[str] = []   # account names in document order (incl. section/total labels)
+        canonical_seen = set()
+        for cols, rows in page_results:
+            n = len(cols)
+            all_month_columns.extend(cols)
+            for r in rows:
+                name = r['name']
+                # Record canonical document order from the first page only;
+                # subsequent pages repeat the same accounts.
+                if name not in canonical_seen:
+                    canonical_rows.append(name)
+                    canonical_seen.add(name)
+                if name not in account_values:
+                    account_values[name] = {}
+                    account_order.append(name)
+                for local_idx, val in r['values'].items():
+                    account_values[name][month_offset + local_idx] = val
+            month_offset += n
 
-            if header_idx == -1:
-                raise ValueError("Could not find header row with months in PDF")
+        total_months = len(all_month_columns)
 
-            # Parse months from header
-            header_line = lines[header_idx]
-            months = []
-            month_columns = []
+        # Build month metadata + month_columns structure expected downstream.
+        months: List[str] = [c['month'] for c in all_month_columns]
+        month_columns = []
+        for idx, c in enumerate(all_month_columns):
+            month_columns.append({
+                'index': idx + 1,   # +1 because synthetic rows put name at index 0
+                'month': c['month'],
+                'start_date': c['start_date'],
+                'end_date': c['end_date'],
+            })
 
-            # Extract month names and positions
-            # Find all month patterns (case insensitive)
-            month_pattern = r'(?i)(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+\d{4}|[A-Z]{3}\s+\d+\s*-\s*[A-Z]{3}\s+\d+\s+\d{4}'
-            matches = list(re.finditer(month_pattern, header_line, re.IGNORECASE))
+        data_by_month: Dict[str, Dict[str, Any]] = {}
+        for c in all_month_columns:
+            data_by_month[c['month']] = {
+                'start_date': c['start_date'],
+                'end_date': c['end_date'],
+                'assets': {},
+                'liabilities': {},
+                'equity': {},
+            }
 
-            for i, match in enumerate(matches):
-                month_text = match.group()
-                month_str, start_date, end_date = self.parse_month_column(month_text)
-                months.append(month_str)
-                month_columns.append({
-                    'text': month_text,
-                    'month': month_str,
-                    'start_date': start_date,
-                    'end_date': end_date,
-                    'start_pos': match.start(),
-                    'end_pos': match.end()
-                })
-
-            # Initialize data structure
-            data_by_month = {}
-            for month_info in month_columns:
-                data_by_month[month_info['month']] = {
-                    'start_date': month_info['start_date'],
-                    'end_date': month_info['end_date'],
-                    'assets': {},
-                    'liabilities': {},
-                    'equity': {}
-                }
-
-            # Parse data lines
-            current_section = None
-            current_subsection = None
-            current_group = None
-
-            for line_idx in range(header_idx + 1, len(lines)):
-                line = lines[line_idx].strip()
-
-                if not line or 'Page' in line:
-                    continue
-
-                # Extract account name (usually the first part before numbers)
-                # Find where numbers start
-                number_match = re.search(r'[\d,\.\-\$\s]+$', line)
-                if number_match:
-                    account_name = line[:number_match.start()].strip()
-                    values_part = number_match.group()
+        # Re-materialise each account into a synthetic CSV-style row
+        # [name, v_month0, v_month1, ...] (string values, blank when absent),
+        # preserving document order, then run the IDENTICAL hierarchy loop the
+        # CSV/XLSX parsers use so the output structure matches exactly.
+        synthetic_rows: List[List[str]] = []
+        for name in canonical_rows:
+            vals = account_values.get(name, {})
+            row = [name]
+            for i in range(total_months):
+                if i in vals:
+                    row.append(f"{vals[i]:.2f}")
                 else:
-                    account_name = line
-                    values_part = ""
+                    row.append("")
+            synthetic_rows.append(row)
 
-                if not account_name:
-                    continue
-
-                # Determine hierarchy
-                if account_name in ['ASSETS', 'Assets']:
-                    current_section = 'assets'
-                    continue
-                elif account_name in ['LIABILITIES AND EQUITY', 'Liabilities and Equity']:
-                    current_section = 'liabilities_equity'
-                    continue
-                elif account_name in ['Current Assets', 'Fixed Assets', 'Other Assets']:
-                    current_subsection = account_name
-                    continue
-                elif account_name in ['Liabilities', 'Current Liabilities', 'Long-term Liabilities', 'Long-Term Liabilities']:
-                    current_subsection = account_name.replace('-term', '-term')
-                    continue
-                elif account_name == 'Equity':
-                    current_subsection = 'Equity'
-                    continue
-                elif account_name.startswith('Total ') or account_name == 'TOTAL':
-                    continue
-                elif account_name in ['Bank Accounts', 'Accounts Receivable', 'Other Current Assets',
-                                    'Accounts Payable', 'Credit Cards', 'Other Current Liabilities']:
-                    current_group = account_name
-                    continue
-
-                # Parse values for each month
-                if values_part and current_section:
-                    # Extract all numbers from the values part
-                    numbers = re.findall(r'[\-\$]?[\d,]+\.?\d*', values_part)
-
-                    # Try to match numbers to months based on position
-                    for i, month_info in enumerate(month_columns):
-                        if i < len(numbers):
-                            value_str = numbers[i].replace('$', '').replace(',', '')
-                            try:
-                                value = float(value_str)
-                            except ValueError:
-                                value = 0.0
-
-                            if value != 0.0 or account_name in ['Retained Earnings', 'Net Income']:
-                                month = month_info['month']
-
-                                if current_section == 'assets':
-                                    section_data = data_by_month[month]['assets']
-                                elif current_section == 'liabilities_equity':
-                                    if current_subsection == 'Equity':
-                                        section_data = data_by_month[month]['equity']
-                                    else:
-                                        section_data = data_by_month[month]['liabilities']
-                                else:
-                                    continue
-
-                                if current_subsection not in section_data:
-                                    section_data[current_subsection] = {}
-                                if current_group and current_group not in section_data[current_subsection]:
-                                    section_data[current_subsection][current_group] = {}
-
-                                account_id = self.get_or_create_account_id(account_name)
-
-                                if current_group:
-                                    section_data[current_subsection][current_group][account_name] = {
-                                        'value': value,
-                                        'id': account_id
-                                    }
-                                else:
-                                    section_data[current_subsection][account_name] = {
-                                        'value': value,
-                                        'id': account_id
-                                    }
+        self._process_balance_sheet_rows(synthetic_rows, month_columns, data_by_month)
 
         return self.build_balance_sheet_json(months, data_by_month)
+
+    def _process_balance_sheet_rows(self, rows: List[List[Any]],
+                                    month_columns: List[Dict[str, Any]],
+                                    data_by_month: Dict[str, Dict[str, Any]]) -> None:
+        """Shared hierarchy walker for the synthetic PDF row table.
+
+        Mirrors the row-processing logic in parse_csv_hierarchy / parse_xlsx so
+        the resulting ``data_by_month`` (and therefore the final JSON) is
+        identical to the CSV/XLSX output for the same report.
+        """
+        current_section = None
+        current_subsection = None
+        current_group = None
+
+        for row in rows:
+            if not row or not row[0] or 'Accrual Basis' in str(row[0]):
+                continue
+
+            account_name = str(row[0]).strip()
+            if not account_name:
+                continue
+
+            if account_name in ['Assets', 'Liabilities and Equity']:
+                current_section = account_name.lower().replace(' and ', '_').replace(' ', '_')
+                continue
+            elif account_name in ['Current Assets', 'Fixed Assets', 'Other Assets',
+                                  'Liabilities', 'Equity', 'Current Liabilities',
+                                  'Long-term Liabilities']:
+                current_subsection = account_name
+                continue
+            elif account_name.startswith('Total for '):
+                continue
+            elif any(account_name == cat for cat in ['Bank Accounts', 'Accounts Receivable',
+                                                     'Other Current Assets', 'Accounts Payable',
+                                                     'Credit Cards', 'Other Current Liabilities',
+                                                     'Truck']):
+                current_group = account_name
+                continue
+
+            for month_info in month_columns:
+                if month_info['index'] < len(row) and row[month_info['index']] is not None:
+                    value_str = str(row[month_info['index']]).strip().replace(',', '').replace('$', '')
+                    try:
+                        value = float(value_str) if value_str else 0.0
+                    except ValueError:
+                        value = 0.0
+
+                    if value != 0.0 or account_name in ['Retained Earnings', 'Net Income']:
+                        month = month_info['month']
+                        if current_section == 'assets':
+                            section_data = data_by_month[month]['assets']
+                        elif current_section == 'liabilities_equity':
+                            if current_subsection == 'Equity':
+                                section_data = data_by_month[month]['equity']
+                            else:
+                                section_data = data_by_month[month]['liabilities']
+                        else:
+                            continue
+
+                        if current_subsection not in section_data:
+                            section_data[current_subsection] = {}
+                        if current_group and current_group not in section_data[current_subsection]:
+                            section_data[current_subsection][current_group] = {}
+
+                        account_id = self.get_or_create_account_id(account_name)
+
+                        if current_group:
+                            section_data[current_subsection][current_group][account_name] = {
+                                'value': value,
+                                'id': account_id
+                            }
+                        else:
+                            section_data[current_subsection][account_name] = {
+                                'value': value,
+                                'id': account_id
+                            }
 
     def convert_file(self, filepath: Path) -> List[Dict[str, Any]]:
         """Convert a file to balance sheet JSON based on its extension"""

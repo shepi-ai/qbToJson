@@ -650,135 +650,324 @@ class ProfitLossConverter(BaseConverter):
 
         return self.build_profit_loss_json(months, data_by_month)
 
+    # ──────────────────────────────────────────────────────────────────
+    # PDF parsing (wide multi-month "Profit and Loss by Month" reports)
+    #
+    # QuickBooks exports these as border-less PDFs where the 36 months do
+    # not fit on a single page width. The report is therefore split into
+    # horizontal PAGE-GROUPS: each group covers a subset of months for ALL
+    # accounts, and the SAME accounts repeat in every group. We recover the
+    # column layout from word x-positions (amounts are right-aligned under
+    # each month header), stitch the months back together by matching
+    # accounts across groups, then feed a reconstructed wide table through
+    # the exact same hierarchy/build pipeline used by the CSV/XLSX parsers
+    # so the output shape is identical.
+    # ──────────────────────────────────────────────────────────────────
+
+    _PDF_MONTHS = ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY',
+                   'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER']
+    _PDF_AMOUNT_RE = re.compile(r'^-?\$?[\d,]+\.\d{2}$')
+
+    @classmethod
+    def _pdf_is_amount(cls, text: str) -> bool:
+        return bool(cls._PDF_AMOUNT_RE.match(text.strip()))
+
+    @staticmethod
+    def _pdf_group_lines(words: List[Dict[str, Any]], tol: float = 3.0) -> List[List[Dict[str, Any]]]:
+        """Cluster extracted words into visual rows by vertical position."""
+        lines: List[List[Dict[str, Any]]] = []
+        for w in sorted(words, key=lambda x: (round(x['top']), x['x0'])):
+            placed = False
+            for line in lines:
+                if abs(line[0]['top'] - w['top']) <= tol:
+                    line.append(w)
+                    placed = True
+                    break
+            if not placed:
+                lines.append([w])
+        for line in lines:
+            line.sort(key=lambda x: x['x0'])
+        lines.sort(key=lambda ln: ln[0]['top'])
+        return lines
+
+    def _pdf_find_header(self, lines: List[List[Dict[str, Any]]]):
+        """Locate the 'DISTRIBUTION ACCOUNT | <months>' header line.
+
+        Returns (header_top, month_names, edges) where edges is the list of
+        right-edge x positions used to snap amounts to a column. A trailing
+        'TOTAL' column (present only on the last page-group) IS included as an
+        extra edge so amounts snap correctly; month_names is padded with a
+        None entry for it so the caller can discard that column's values.
+        """
+        for line in lines:
+            joined = ' '.join(w['text'] for w in line).upper()
+            # The header label can wrap so that "DISTRIBUTION" sits on the
+            # month line while "ACCOUNT" drops to the year sub-line. Anchor on
+            # "DISTRIBUTION" plus the presence of month names.
+            if 'DISTRIBUTION' not in joined:
+                continue
+            if not any(m in joined for m in self._PDF_MONTHS):
+                continue
+            month_names: List[str] = []
+            edges: List[float] = []
+            for w in line:
+                t = w['text'].upper()
+                if t in self._PDF_MONTHS:
+                    month_names.append(t)
+                    edges.append(w['x1'])
+                elif t == 'TOTAL':
+                    # Keep an edge for the Total column so amounts align, but
+                    # mark it so its values are dropped (CSV/XLSX omit Total).
+                    month_names.append(None)
+                    edges.append(w['x1'])
+            if month_names:
+                return line[0]['top'], month_names, edges
+        return None, None, None
+
     def parse_pdf(self, filepath: Path) -> List[Dict[str, Any]]:
-        """Parse PDF file and convert to profit and loss JSON"""
+        """Parse a QuickBooks 'Profit and Loss by Month' PDF.
+
+        Stitches month columns across horizontal page-groups, then reuses the
+        CSV hierarchy pipeline so the JSON shape matches parse_csv/parse_xlsx.
+        """
         import pdfplumber
 
+        # Per-page extracted info: list of (month_names, edges, data_lines)
+        # where data_lines is a list of (x0, name_words, amount_words).
+        pages_info = []
+
         with pdfplumber.open(filepath) as pdf:
-            # Extract text from all pages
-            all_text = ""
             for page in pdf.pages:
-                text = page.extract_text()
-                if text:
-                    all_text += text + "\n"
-
-            # Split into lines
-            lines = all_text.split('\n')
-
-            # Find header line with months
-            header_idx = -1
-            year_line_idx = -1
-            for i, line in enumerate(lines):
-                # Skip lines that are date ranges (e.g., "January 1-July 31, 2025")
-                if '-' in line and any(month in line.upper() for month in ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY']):
+                words = page.extract_words()
+                if not words:
                     continue
 
-                # Look for line that contains month names (case insensitive)
-                if any(month in line.upper() for month in ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY']):
-                    # Verify it's likely a header by checking for multiple months
-                    month_count = sum(1 for month in ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY'] if month in line.upper())
-                    if month_count >= 3:  # Require at least 3 months to be sure it's the header
-                        header_idx = i
-                        # Check if next line has years
-                        if i + 1 < len(lines) and '2025' in lines[i + 1]:
-                            year_line_idx = i + 1
-                        break
+                lines = self._pdf_group_lines(words)
+                header_top, month_names, edges = self._pdf_find_header(lines)
+                if not month_names:
+                    continue
 
-            if header_idx == -1:
-                raise ValueError("Could not find header row with months in PDF")
+                data_lines = []
+                for line in lines:
+                    top = line[0]['top']
+                    # Skip header and everything above it (title / company /
+                    # date-range / the header line and its year sub-line).
+                    if top <= header_top + 12:
+                        continue
 
-            # Parse months from header
-            header_line = lines[header_idx]
-            year_line = lines[year_line_idx] if year_line_idx != -1 else ""
-            months = []
-            month_columns = []
+                    amount_words = [w for w in line if self._pdf_is_amount(w['text'])]
+                    name_words = [w for w in line if not self._pdf_is_amount(w['text'])]
+                    name = ' '.join(w['text'] for w in name_words).strip()
 
-            # Extract month names and positions
-            # Find all month patterns (case insensitive)
-            # Include all 12 months to be comprehensive
-            all_months = ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY',
-                         'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER']
-            month_pattern = r'(?i)(' + '|'.join(all_months) + ')'
-            matches = list(re.finditer(month_pattern, header_line, re.IGNORECASE))
+                    # Report furniture: footers, page numbers (e.g. "1/15"),
+                    # the "Accrual Basis ... GMTZ" stamp.
+                    if not name and not amount_words:
+                        continue
+                    upper = name.upper()
+                    if 'GMTZ' in upper or 'ACCRUAL BASIS' in upper or 'CASH BASIS' in upper:
+                        continue
+                    if re.fullmatch(r'\d+/\d+', name):
+                        continue
+                    if not name and amount_words:
+                        # Stray amounts with no account name; ignore.
+                        continue
 
-            # Extract years from year line if available
-            year_pattern = r'\d{4}'
-            year_matches = list(re.finditer(year_pattern, year_line)) if year_line else []
+                    x0 = name_words[0]['x0'] if name_words else (amount_words[0]['x0'] if amount_words else 0.0)
+                    data_lines.append({
+                        'top': top,
+                        'x0': x0,
+                        'name': name,
+                        'amount_words': amount_words,
+                    })
 
-            for i, match in enumerate(matches):
-                month_name = match.group()
-                # Try to find corresponding year
-                year = "2025"  # Default
-                if i < len(year_matches):
-                    year = year_matches[i].group()
-
-                month_text = f"{month_name} {year}"
-                month_str, start_date, end_date = self.parse_month_column(month_text)
-                months.append(month_str)
-                month_columns.append({
-                    'text': month_text,
-                    'month': month_str,
-                    'start_date': start_date,
-                    'end_date': end_date,
-                    'start_pos': match.start(),
-                    'end_pos': match.end(),
-                    'index': i + 1  # Column index for data extraction
+                pages_info.append({
+                    'month_names': month_names,
+                    'edges': edges,
+                    'data_lines': data_lines,
                 })
 
-            # Initialize data structure
-            data_by_month = {}
-            for month_info in month_columns:
-                data_by_month[month_info['month']] = {
-                    'start_date': month_info['start_date'],
-                    'end_date': month_info['end_date'],
-                    'sections': []
-                }
+        if not pages_info:
+            raise ValueError("Could not find header row with months in PDF")
 
-            # Convert lines to row format for parsing
-            rows = []
-            start_line = header_idx + 2 if year_line_idx != -1 else header_idx + 1
+        # ── Group consecutive pages that share the same month sequence ──
+        page_groups = []
+        for info in pages_info:
+            if page_groups and page_groups[-1]['month_names'] == info['month_names']:
+                page_groups[-1]['data_lines'].extend(info['data_lines'])
+            else:
+                page_groups.append({
+                    'month_names': list(info['month_names']),
+                    'edges': info['edges'],
+                    'data_lines': list(info['data_lines']),
+                })
 
-            for line in lines[start_line:]:
-                if not line.strip() or 'Page' in line:
-                    rows.append([''])
+        # ── Assign a calendar (month, year) to every group column ──
+        # Months run sequentially across groups starting from the report's
+        # first month. Determine the start year from the first group's first
+        # month relative to the report; default to chronological inference.
+        start_year = self._pdf_detect_start_year(filepath, page_groups[0]['month_names'][0])
+
+        # Build the full ordered list of (iso_month, header_text) and a per
+        # group mapping of column-index -> iso_month.
+        cur_year = start_year
+        prev_month_num = None
+        ordered_months: List[str] = []
+        month_meta: List[Tuple[str, date, date]] = []  # (iso, start, end) in order
+        for group in page_groups:
+            # col_iso is parallel to edges; the Total column (month_names entry
+            # of None) maps to None so its snapped values are discarded.
+            group['col_iso'] = []
+            for mname in group['month_names']:
+                if mname is None:
+                    group['col_iso'].append(None)
                     continue
+                month_num = self._PDF_MONTHS.index(mname) + 1
+                if prev_month_num is not None and month_num <= prev_month_num:
+                    cur_year += 1
+                prev_month_num = month_num
+                iso, sd, ed = self.parse_month_column(f"{mname} {cur_year}")
+                group['col_iso'].append(iso)
+                if iso not in ordered_months:
+                    ordered_months.append(iso)
+                    month_meta.append((iso, sd, ed))
 
-                # Extract account name (first part before numbers)
-                # Find where numbers start
-                number_match = re.search(r'[\-\$\d,\.]+', line)
-                if number_match:
-                    account_name = line[:number_match.start()].strip()
-                    values_part = line[number_match.start():]
-                else:
-                    account_name = line.strip()
-                    values_part = ""
+        # ── Stitch months across groups by POSITIONAL alignment ──
+        # Every page-group repeats the SAME accounts in the SAME reading order
+        # (account names may legitimately repeat within a report, so we cannot
+        # de-duplicate by name). We therefore merge wrapped names within each
+        # group, then align the resulting line lists row-by-row across groups.
+        # The group with the most lines defines the canonical row skeleton.
+        merged_groups = []
+        for group in page_groups:
+            merged = self._pdf_merge_wrapped(group['data_lines'])
+            merged_groups.append({
+                'edges': group['edges'],
+                'col_iso': group['col_iso'],
+                'lines': merged,
+            })
 
-                row_data = [account_name]
+        skeleton_idx = max(range(len(merged_groups)),
+                           key=lambda i: len(merged_groups[i]['lines']))
+        skeleton = merged_groups[skeleton_idx]['lines']
+        n_rows = len(skeleton)
 
-                # Extract all numbers from the values part
-                if values_part:
-                    numbers = re.findall(r'[\-\$]?[\d,]+\.?\d*', values_part)
-                    # Remove dollar signs and clean up
-                    cleaned_numbers = []
-                    for num in numbers:
-                        cleaned = num.replace('$', '').replace(',', '')
-                        if cleaned and cleaned != '.':
-                            cleaned_numbers.append(cleaned)
+        # Per-row, per-month values.
+        row_values: List[Dict[str, float]] = [dict() for _ in range(n_rows)]
 
-                    # Add numbers as columns
-                    for num in cleaned_numbers[:len(month_columns)]:  # Only take as many as we have months
-                        row_data.append(num)
+        for mg in merged_groups:
+            lines = mg['lines']
+            edges = mg['edges']
+            col_iso = mg['col_iso']
+            offset = self._pdf_align_offset(skeleton, lines)
+            for li, entry in enumerate(lines):
+                ri = li + offset
+                if ri < 0 or ri >= n_rows:
+                    continue
+                for w in entry['amount_words']:
+                    x1 = w['x1']
+                    best = min(range(len(edges)), key=lambda i: abs(edges[i] - x1))
+                    iso = col_iso[best]
+                    if iso is None:  # Total column — not part of the output
+                        continue
+                    row_values[ri][iso] = self.parse_amount(w['text'])
 
-                # Pad with empty strings if needed
-                while len(row_data) < len(month_columns) + 1:
-                    row_data.append('')
+        # ── Build a synthetic wide table identical in shape to the CSV ──
+        month_columns = []
+        months = []
+        data_by_month = {}
+        for idx, (iso, sd, ed) in enumerate(month_meta, start=1):
+            months.append(iso)
+            month_columns.append({
+                'index': idx,
+                'month': iso,
+                'start_date': sd,
+                'end_date': ed,
+                'header': iso,
+            })
+            data_by_month[iso] = {
+                'start_date': sd,
+                'end_date': ed,
+                'sections': [],
+            }
 
-                rows.append(row_data)
+        rows: List[List[str]] = []
+        for ri, entry in enumerate(skeleton):
+            row = [entry['name']]
+            vals = row_values[ri]
+            for iso in months:
+                row.append(f"{vals[iso]:.2f}" if iso in vals else '')
+            rows.append(row)
 
-            # Parse data rows and build hierarchy
-            self.parse_rows_recursive(rows, 0, month_columns, data_by_month)
+        # Reuse the exact CSV hierarchy pipeline.
+        self.parse_rows_recursive(rows, 0, month_columns, data_by_month)
 
-            return self.build_profit_loss_json(months, data_by_month)
+        return self.build_profit_loss_json(months, data_by_month)
+
+    @staticmethod
+    def _pdf_align_offset(skeleton: List[Dict[str, Any]], lines: List[Dict[str, Any]]) -> int:
+        """Find the row offset that best aligns `lines` onto `skeleton`.
+
+        Page-groups repeat the same accounts in the same order, so the
+        alignment is normally offset 0. We still search a small window of
+        offsets and pick the one that maximises account-name matches, which
+        gracefully handles any group that drops leading/trailing furniture.
+        """
+        sk_names = [e['name'] for e in skeleton]
+        ln_names = [e['name'] for e in lines]
+        best_off, best_score = 0, -1
+        for off in range(-3, 4):
+            score = 0
+            for i, nm in enumerate(ln_names):
+                j = i + off
+                if 0 <= j < len(sk_names) and sk_names[j] == nm:
+                    score += 1
+            if score > best_score:
+                best_score, best_off = score, off
+        return best_off
+
+    @staticmethod
+    def _pdf_merge_wrapped(data_lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Merge wrapped account-name continuation lines.
+
+        QB wraps long account names onto a second line that carries no
+        amounts, sits tightly under the previous line (vertical gap notably
+        smaller than a normal row), and at the same or deeper indent. Such a
+        line is appended to the previous account's name. All other name-only
+        lines (section headers, all-zero data rows) are kept standalone.
+        """
+        WRAP_GAP = 11.5
+        merged: List[Dict[str, Any]] = []
+        for ln in data_lines:
+            gap = ln['top'] - merged[-1]['top'] if merged else 0
+            if (merged and not ln['amount_words']
+                    and 0 < gap <= WRAP_GAP
+                    and ln['x0'] >= merged[-1]['x0'] - 1
+                    and not ln['name'].lower().startswith('total ')):
+                merged[-1]['name'] = (merged[-1]['name'] + ' ' + ln['name']).strip()
+                merged[-1]['top'] = ln['top']
+            else:
+                merged.append(dict(ln))
+        return merged
+
+    def _pdf_detect_start_year(self, filepath: Path, first_month_name: str) -> int:
+        """Determine the starting calendar year for the first month-group.
+
+        Reads the report date-range line (e.g. "January 1, 2023-December 31,
+        2025") to find the earliest year. Falls back to the latest 4-digit
+        year minus a best-effort offset, then to the current year.
+        """
+        import pdfplumber
+        try:
+            with pdfplumber.open(filepath) as pdf:
+                text = pdf.pages[0].extract_text() or ""
+        except Exception:
+            text = ""
+        years = [int(y) for y in re.findall(r'\b(19|20)\d{2}\b', text)]
+        # re.findall with the group above returns the prefix; redo properly:
+        years = [int(y) for y in re.findall(r'\b(?:19|20)\d{2}\b', text)]
+        if years:
+            return min(years)
+        return datetime.now().year
 
 
 def main():

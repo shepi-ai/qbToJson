@@ -210,94 +210,150 @@ class AccountsPayableConverter(BaseConverter):
             "rows": {"row": vendors}
         }
 
+    # Aging-bucket order matching the report columns (Current ... 91+ then TOTAL).
+    _BUCKET_KEYS = ['current', '1_30', '31_60', '61_90', '91_over', 'total']
+
+    # An amount: optional leading "-" / "$", thousands-separated, two decimals.
+    _AMOUNT_RE = re.compile(r'^-?\$?[\d,]+\.\d{2}\$?$')
+
+    @classmethod
+    def _is_amount(cls, text: str) -> bool:
+        return bool(cls._AMOUNT_RE.match(text.strip()))
+
+    @staticmethod
+    def _group_words_into_lines(words: List[Dict[str, Any]], tol: float = 3.0) -> List[List[Dict[str, Any]]]:
+        """Cluster extracted words into visual lines by their vertical position."""
+        lines: List[List[Dict[str, Any]]] = []
+        for w in sorted(words, key=lambda x: (round(x['top']), x['x0'])):
+            placed = False
+            for line in lines:
+                if abs(line[0]['top'] - w['top']) <= tol:
+                    line.append(w)
+                    placed = True
+                    break
+            if not placed:
+                lines.append([w])
+        for line in lines:
+            line.sort(key=lambda x: x['x0'])
+        lines.sort(key=lambda ln: ln[0]['top'])
+        return lines
+
+    def _find_bucket_edges(self, lines: List[List[Dict[str, Any]]]) -> Optional[List[float]]:
+        """Locate the header row and return the right-edge x of each aging column.
+
+        QB right-aligns every amount under its column header, so we match each
+        amount to a bucket by comparing its right edge (x1) against the right
+        edge of the header label for that column.
+        """
+        for line in lines:
+            joined = ' '.join(w['text'] for w in line).upper()
+            if 'VENDOR' not in joined or ('CURRENT' not in joined and 'TOTAL' not in joined):
+                continue
+            # Header labels wrap across multiple words (e.g. "1 - 30",
+            # "91 AND OVER"). Walk left-to-right and treat the right edge of the
+            # word that ends each label as that column's anchor.
+            edges: List[float] = []
+            labels = ['CURRENT', '1 - 30', '31 - 60', '61 - 90', '91 AND OVER', 'TOTAL']
+            label_idx = 0
+            buf = ''
+            buf_x1 = 0.0
+            for w in line:
+                txt = w['text'].upper()
+                if txt == 'VENDOR':
+                    continue
+                buf = (buf + ' ' + txt).strip() if buf else txt
+                buf_x1 = w['x1']
+                if label_idx < len(labels) and buf.replace(' ', '') == labels[label_idx].replace(' ', ''):
+                    edges.append(buf_x1)
+                    label_idx += 1
+                    buf = ''
+            if len(edges) == len(labels):
+                return edges
+        return None
+
+    def _assign_buckets(self, amount_words: List[Dict[str, Any]], edges: List[float]) -> Dict[str, float]:
+        """Map each amount to its aging bucket by nearest header right-edge."""
+        result = {k: 0.0 for k in self._BUCKET_KEYS}
+        for w in amount_words:
+            x1 = w['x1']
+            best = min(range(len(edges)), key=lambda i: abs(edges[i] - x1))
+            result[self._BUCKET_KEYS[best]] = self.parse_amount(w['text'])
+        return result
+
     def parse_pdf(self, filepath: Path) -> Dict[str, Any]:
-        """Parse PDF file and convert to QuickBooks JSON format"""
+        """Parse PDF file and convert to QuickBooks JSON format.
+
+        QB exports border-less PDFs, so plain text extraction collapses the
+        aging columns unpredictably. We instead work from word positions: amounts
+        are right-aligned under their column headers, so each amount is assigned
+        to a bucket by matching its right edge to the header column edges. Vendor
+        names (which may wrap across words) are everything that is not an amount.
+        """
         self.check_pdf_support()
 
-        vendors = []
-        totals = {'current': 0.0, '1_30': 0.0, '31_60': 0.0, '61_90': 0.0, '91_over': 0.0, 'total': 0.0}
+        vendors: List[Dict[str, Any]] = []
+        totals = {k: 0.0 for k in self._BUCKET_KEYS}
         vendor_id = 1
 
         print("[AP-PARSER] Starting PDF parse")
 
         with pdfplumber.open(filepath) as pdf:
             for page in pdf.pages:
-                text = page.extract_text()
-                if not text:
+                words = page.extract_words()
+                if not words:
                     continue
 
-                lines = text.split('\n')
-                print(f"[AP-PARSER] Page has {len(lines)} lines")
+                lines = self._group_words_into_lines(words)
+                edges = self._find_bucket_edges(lines)
+                if not edges:
+                    print("[AP-PARSER] No header found on page; skipping")
+                    continue
 
-                header_idx = -1
-                for i, line in enumerate(lines):
-                    if 'VENDOR' in line.upper() and ('CURRENT' in line.upper() or 'TOTAL' in line.upper()):
-                        header_idx = i
-                        print(f"[AP-PARSER] Found header at line {i}")
+                header_top = None
+                for line in lines:
+                    joined = ' '.join(w['text'] for w in line).upper()
+                    if 'VENDOR' in joined and ('CURRENT' in joined or 'TOTAL' in joined):
+                        header_top = line[0]['top']
                         break
 
-                if header_idx == -1:
-                    continue
-
-                for line in lines[header_idx + 1:]:
-                    line = line.strip()
-                    if not line:
+                done = False
+                for line in lines:
+                    if header_top is not None and line[0]['top'] <= header_top:
                         continue
 
-                    if line.upper().startswith('TOTAL'):
-                        amounts = re.findall(r'[\d,]+\.\d{2}', line)
-                        if len(amounts) >= 6:
-                            totals['current'] = self.parse_amount(amounts[0])
-                            totals['1_30'] = self.parse_amount(amounts[1])
-                            totals['31_60'] = self.parse_amount(amounts[2])
-                            totals['61_90'] = self.parse_amount(amounts[3])
-                            totals['91_over'] = self.parse_amount(amounts[4])
-                            totals['total'] = self.parse_amount(amounts[5])
+                    amount_words = [w for w in line if self._is_amount(w['text'])]
+                    name_words = [w for w in line if not self._is_amount(w['text'])]
+                    name = ' '.join(w['text'] for w in name_words).strip()
+
+                    # Report furniture: footers ("... GMTZ"), page numbers, etc.
+                    if not amount_words and not name:
+                        continue
+                    if 'GMTZ' in name.upper() or re.search(r'\bGMT', name.upper()):
+                        continue
+
+                    if name.upper().startswith('TOTAL') and amount_words:
+                        buckets = self._assign_buckets(amount_words, edges)
+                        totals.update(buckets)
                         print(f"[AP-PARSER] Found TOTAL row: {totals}")
+                        done = True
                         break
 
-                    amounts = re.findall(r'[\d,]+\.\d{2}', line)
-
-                    if not amounts:
+                    if not amount_words:
+                        # A name-only line with no amounts: skip stray furniture.
                         continue
 
-                    vendor_line = line
-                    for amt in amounts:
-                        vendor_line = vendor_line.replace(amt, '', 1)
-                    vendor_name = vendor_line.strip()
-
-                    if len(amounts) == 6:
-                        current = self.parse_amount(amounts[0])
-                        days_1_30 = self.parse_amount(amounts[1])
-                        days_31_60 = self.parse_amount(amounts[2])
-                        days_61_90 = self.parse_amount(amounts[3])
-                        days_91_over = self.parse_amount(amounts[4])
-                        total = self.parse_amount(amounts[5])
-                    elif len(amounts) == 1:
-                        current = 0.0
-                        days_1_30 = 0.0
-                        days_31_60 = 0.0
-                        days_61_90 = 0.0
-                        days_91_over = 0.0
-                        total = self.parse_amount(amounts[0])
-                    elif len(amounts) == 2:
-                        current = 0.0
-                        days_1_30 = self.parse_amount(amounts[0])
-                        days_31_60 = 0.0
-                        days_61_90 = 0.0
-                        days_91_over = 0.0
-                        total = self.parse_amount(amounts[1])
-                    else:
-                        print(f"[AP-PARSER] Skipping line with {len(amounts)} amounts: {line[:50]}")
-                        continue
-
+                    buckets = self._assign_buckets(amount_words, edges)
                     vendor_row = self.create_vendor_row(
-                        vendor_name, str(vendor_id),
-                        current, days_1_30, days_31_60, days_61_90, days_91_over, total
+                        name, str(vendor_id),
+                        buckets['current'], buckets['1_30'], buckets['31_60'],
+                        buckets['61_90'], buckets['91_over'], buckets['total']
                     )
                     vendors.append(vendor_row)
                     vendor_id += 1
-                    print(f"[AP-PARSER] Added vendor: {vendor_name} (${total})")
+                    print(f"[AP-PARSER] Added vendor: {name} (${buckets['total']})")
+
+                if done:
+                    break
 
         print(f"[AP-PARSER] Parsed {len(vendors)} vendor rows")
 

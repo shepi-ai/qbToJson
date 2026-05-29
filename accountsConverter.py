@@ -315,74 +315,188 @@ class AccountsConverter(BaseConverter):
 
         return accounts
 
+    # Table-style extraction settings (QB PDFs draw no cell borders). Retained
+    # for reference; the word-position approach below proved more reliable for
+    # the Account List layout where long names/types wrap onto extra lines.
+    _PDF_TABLE_SETTINGS = {"vertical_strategy": "text", "horizontal_strategy": "text"}
+
+    # Words at or below this top-coordinate gap are treated as the same visual row.
+    _ROW_TOLERANCE = 3
+
+    @staticmethod
+    def _group_words_into_rows(words: List[Dict[str, Any]], tol: float) -> List[List[Dict[str, Any]]]:
+        """Group extracted words into visual rows by their vertical position."""
+        rows: List[List[Dict[str, Any]]] = []
+        for w in sorted(words, key=lambda w: (round(w['top']), w['x0'])):
+            if rows and abs(w['top'] - rows[-1][0]['top']) <= tol:
+                rows[-1].append(w)
+            else:
+                rows.append([w])
+        for r in rows:
+            r.sort(key=lambda w: w['x0'])
+        return rows
+
+    @staticmethod
+    def _is_report_furniture(text: str) -> bool:
+        """True for QB title/footer rows that are not account data."""
+        low = text.lower()
+        if not low:
+            return True
+        if 'gmtz' in low or 'accrual basis' in low or 'cash basis' in low:
+            return True
+        if 'account list' in low or 'sandbox company' in low:
+            return True
+        # Footer date line, e.g. "Wednesday, March 04, 2026 10:53 PM GMTZ 1/5"
+        if re.search(r'\b\d{1,2}:\d{2}\b', low) and re.search(r'\d/\d', low):
+            return True
+        return False
+
     def parse_pdf(self, filepath: Path) -> List[Dict[str, Any]]:
-        """Parse PDF file and convert to account objects"""
+        """Parse a QuickBooks "Account List" PDF into account objects.
+
+        QB renders these reports border-less and wraps long FULL NAME / TYPE /
+        DETAIL TYPE values onto following lines that the text extractor returns
+        as separate, partial rows. We recover columns from each word's x-position
+        (using the per-page header to locate column boundaries, since they shift
+        page to page) and merge wrapped continuation rows back into the account
+        row above them. Output matches parse_csv / parse_xlsx exactly.
+        """
         self.check_pdf_support()
 
-        accounts = []
+        accounts: List[Dict[str, Any]] = []
+        parent_ids: Dict[str, str] = {}
+
+        # A pending account being assembled across one or more wrapped rows.
+        pending: Optional[Dict[str, Any]] = None
+
+        def flush():
+            """Materialise the pending account into the accounts list."""
+            nonlocal pending
+            if pending is None:
+                return
+            name = pending['name'].strip()
+            # Apply the same report-furniture filter used by parse_csv / parse_xlsx
+            # so all three sources reconcile to an identical account set.
+            is_furniture = any(
+                keyword in name.lower()
+                for keyword in ['basis', 'gmtz', 'accrual', 'cash']
+            )
+            if name and name.upper() != 'TOTAL' and not is_furniture:
+                parent_id = None
+                if ':' in name:
+                    parent_name = name.rsplit(':', 1)[0]
+                    parent_id = parent_ids.get(parent_name)
+                account = self.create_account_object(
+                    name=name,
+                    type_str=pending['type'].strip(),
+                    detail_type=pending['detail'].strip() or 'Other',
+                    description=pending['description'].strip() or None,
+                    balance=pending['balance'],
+                    parent_id=parent_id,
+                )
+                accounts.append(account)
+                parent_ids[name] = account['id']
+            pending = None
 
         with pdfplumber.open(filepath) as pdf:
             for page in pdf.pages:
-                text = page.extract_text()
-                if not text:
+                words = page.extract_words(use_text_flow=False)
+                if not words:
                     continue
 
-                lines = text.split('\n')
+                rows = self._group_words_into_rows(words, self._ROW_TOLERANCE)
 
-                header_idx = -1
-                for i, line in enumerate(lines):
-                    if 'FULL NAME' in line and 'TYPE' in line and 'DETAIL TYPE' in line:
-                        header_idx = i
+                # Locate the header row and derive column x-boundaries from it.
+                type_x = detail_x = desc_x = balance_x = None
+                data_start = None
+                for ridx, row in enumerate(rows):
+                    texts = [w['text'] for w in row]
+                    joined = ' '.join(texts)
+                    if 'FULL' in texts and 'NAME' in texts and 'DETAIL' in texts:
+                        # Standalone "TYPE" is the first TYPE not preceded by DETAIL.
+                        for i, w in enumerate(row):
+                            if w['text'] == 'TYPE':
+                                prev = row[i - 1]['text'] if i > 0 else ''
+                                if prev != 'DETAIL' and type_x is None:
+                                    type_x = w['x0']
+                            elif w['text'] == 'DETAIL':
+                                detail_x = w['x0']
+                            elif w['text'] == 'DESCRIPTION':
+                                desc_x = w['x0']
+                            elif w['text'] == 'TOTAL':
+                                balance_x = w['x0']
+                        data_start = ridx + 1
                         break
 
-                if header_idx == -1:
+                if data_start is None or type_x is None or detail_x is None:
                     continue
 
-                for i in range(header_idx + 1, len(lines)):
-                    line = lines[i].strip()
+                # Column thresholds. DETAIL TYPE and DESCRIPTION share a region in
+                # this report (DESCRIPTION is empty); treat everything between the
+                # DETAIL boundary and the balance column as DETAIL TYPE.
+                balance_boundary = balance_x if balance_x is not None else 1e9
 
-                    if not line or line.startswith('TOTAL'):
-                        break
-
-                    if any(keyword in line.lower() for keyword in ['basis', 'gmtz', 'accrual', 'cash']):
+                for row in rows[data_start:]:
+                    joined = ' '.join(w['text'] for w in row).strip()
+                    if not joined:
+                        continue
+                    if self._is_report_furniture(joined):
+                        # A trailing footer ends the page's data; flush pending.
                         continue
 
-                    type_patterns = ['Equity', 'Expenses', 'Income', 'Other Current Assets',
-                                     'Other Expense', 'Other Income']
+                    name_parts, type_parts, detail_parts, bal_parts = [], [], [], []
+                    for w in row:
+                        x = w['x0']
+                        text = w['text']
+                        # Balance values right-align, so their x-position varies a
+                        # lot; identify them by content (currency / number) and the
+                        # fact that they sit in the right-hand region of the page.
+                        is_amount = bool(re.fullmatch(r'-?\$?[\d,]+\.?\d*', text))
+                        if is_amount and x >= detail_x:
+                            bal_parts.append(text)
+                        elif x < type_x - 2:
+                            name_parts.append(text)
+                        elif x < detail_x - 2:
+                            type_parts.append(text)
+                        else:
+                            detail_parts.append(text)
 
-                    type_start = -1
-                    found_type = None
-                    for pattern in type_patterns:
-                        idx = line.find(pattern)
-                        if idx > 0:
-                            type_start = idx
-                            found_type = pattern
-                            break
+                    name_text = ' '.join(name_parts).strip()
+                    type_text = ' '.join(type_parts).strip()
+                    detail_text = ' '.join(detail_parts).strip()
+                    bal_text = ' '.join(bal_parts).strip()
 
-                    if type_start > 0:
-                        name = line[:type_start].strip()
-                        rest = line[type_start + len(found_type):].strip()
+                    # The grand-total line: name == TOTAL with a balance, no type.
+                    if name_text.upper() == 'TOTAL' and not type_text:
+                        flush()
+                        continue
 
-                        detail_type = rest
-                        detail_type = re.sub(r'\s*\$?[\d,]+\.?\d*\s*$', '', detail_type).strip()
+                    # A new account row carries BOTH a FULL NAME and a TYPE value.
+                    # Rows missing either are wrapped continuations of the account
+                    # above (a wrapped name has no type; a wrapped multi-word
+                    # type/detail has no name).
+                    if name_text and type_text:
+                        flush()
+                        pending = {
+                            'name': name_text,
+                            'type': type_text,
+                            'detail': detail_text,
+                            'description': '',
+                            'balance': self.parse_amount(bal_text) if bal_text else 0.0,
+                        }
+                    elif pending is not None:
+                        # Continuation: append each fragment to its column.
+                        if name_text:
+                            pending['name'] = (pending['name'] + ' ' + name_text).strip()
+                        if type_text:
+                            pending['type'] = (pending['type'] + ' ' + type_text).strip()
+                        if detail_text:
+                            pending['detail'] = (pending['detail'] + ' ' + detail_text).strip()
+                        if bal_text and pending['balance'] == 0.0:
+                            pending['balance'] = self.parse_amount(bal_text)
+                    # else: stray fragment before any account; ignore.
 
-                        if not detail_type:
-                            if 'Expense' in found_type:
-                                detail_type = 'Other Miscellaneous Service Cost'
-                            elif 'Income' in found_type:
-                                detail_type = 'Service/Fee Income'
-                            elif 'Asset' in found_type:
-                                detail_type = 'Other Current Assets'
-                            else:
-                                detail_type = 'Other'
-
-                        account = self.create_account_object(
-                            name=name,
-                            type_str=found_type,
-                            detail_type=detail_type,
-                            balance=0.0
-                        )
-                        accounts.append(account)
+                flush()  # end of page
 
         return accounts
 

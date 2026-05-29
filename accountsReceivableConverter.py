@@ -373,151 +373,196 @@ class AccountsReceivableConverter(BaseConverter):
             "rows": {"row": customers}
         }
 
-    def parse_pdf(self, filepath: Path) -> Dict[str, Any]:
-        """Parse PDF file and convert to QuickBooks JSON format"""
-        self.check_pdf_support()
+    # QB A/R Aging PDFs draw no cell borders. Reading the page with the table
+    # extractor smears the bucket columns together (the header "CUSTOMER CURRENT
+    # 1 - 30 ..." is split mid-word), so instead we read individual words with
+    # their x-coordinates and assign each amount to a bucket by horizontal
+    # position. This recovers every customer (including ones with several
+    # bucket amounts) and handles names/labels that wrap onto a second line.
+    _AMOUNT_RE = re.compile(r'-?\$?[\d,]+\.\d{2}')
 
-        customers = []
-        totals = {'current': 0.0, '1_30': 0.0, '31_60': 0.0, '61_90': 0.0, '91_over': 0.0, 'total': 0.0}
+    # Right edges (x1) of each aging-bucket column, derived from the report
+    # header word positions. Amounts are right-aligned, so an amount belongs to
+    # the bucket whose right edge its own right edge sits closest to.
+    _BUCKET_EDGES = [
+        (298, 'current'),
+        (334, '1_30'),
+        (378, '31_60'),
+        (426, '61_90'),
+        (507, '91_over'),
+        (564, 'total'),
+    ]
 
-        current_parent = None
-        sub_customers = []
-        parent_totals = {'current': 0.0, '1_30': 0.0, '31_60': 0.0, '61_90': 0.0, '91_over': 0.0, 'total': 0.0}
+    @classmethod
+    def _bucket_for_x(cls, x1: float) -> str:
+        """Map an amount's right edge to its aging-bucket key."""
+        return min(cls._BUCKET_EDGES, key=lambda e: abs(e[0] - x1))[1]
 
-        print("[AR-PARSER] Starting PDF parse")
+    def _extract_pdf_lines(self, filepath: Path) -> List[Dict[str, Any]]:
+        """Read the PDF into logical report lines.
 
+        Each line is ``{"name": str, "amounts": {bucket: value}}``. Words sharing
+        the same vertical position are grouped; non-numeric words form the name,
+        numeric words are placed into buckets by x-position. Report furniture
+        (title, company name, "As of ...", page footer, the column header) is
+        skipped. Only lines after the column header on each page are kept.
+        """
+        lines: List[Dict[str, Any]] = []
         with pdfplumber.open(filepath) as pdf:
             for page in pdf.pages:
-                text = page.extract_text()
-                if not text:
-                    continue
+                grouped: Dict[int, List[Dict[str, Any]]] = {}
+                for w in page.extract_words():
+                    grouped.setdefault(round(w['top']), []).append(w)
 
-                lines = text.split('\n')
-                print(f"[AR-PARSER] Page has {len(lines)} lines")
+                seen_header = False
+                for top in sorted(grouped):
+                    words = sorted(grouped[top], key=lambda w: w['x0'])
+                    name_parts: List[str] = []
+                    amounts: Dict[str, float] = {}
+                    for w in words:
+                        text = w['text']
+                        if self._AMOUNT_RE.fullmatch(text):
+                            bucket = self._bucket_for_x(w['x1'])
+                            amounts[bucket] = self.parse_amount(text)
+                        else:
+                            name_parts.append(text)
+                    name = ' '.join(name_parts).strip()
 
-                header_idx = -1
-                for i, line in enumerate(lines):
-                    if 'CUSTOMER' in line.upper() and ('CURRENT' in line.upper() or 'TOTAL' in line.upper()):
-                        header_idx = i
-                        print(f"[AR-PARSER] Found header at line {i}")
-                        break
-
-                if header_idx == -1:
-                    continue
-
-                for line in lines[header_idx + 1:]:
-                    line = line.strip()
-                    if not line:
+                    # Locate / skip the column header ("CUSTOMER ... TOTAL").
+                    if not seen_header:
+                        upper = name.upper()
+                        if upper.startswith('CUSTOMER') and ('CURRENT' in upper or 'TOTAL' in upper):
+                            seen_header = True
                         continue
 
-                    if line.upper().startswith('TOTAL') and not line.startswith('Total for'):
-                        amounts = re.findall(r'[\d,]+\.\d{2}', line)
-                        if len(amounts) >= 6:
-                            totals['current'] = self.parse_amount(amounts[0])
-                            totals['1_30'] = self.parse_amount(amounts[1])
-                            totals['31_60'] = self.parse_amount(amounts[2])
-                            totals['61_90'] = self.parse_amount(amounts[3])
-                            totals['91_over'] = self.parse_amount(amounts[4])
-                            totals['total'] = self.parse_amount(amounts[5])
-                        print(f"[AR-PARSER] Found TOTAL row: {totals}")
-                        break
-
-                    if line.startswith('Total for '):
-                        if current_parent and sub_customers:
-                            parent_row = self.create_parent_customer_row(
-                                current_parent, str(self.customer_id), sub_customers,
-                                parent_totals['current'], parent_totals['1_30'], parent_totals['31_60'],
-                                parent_totals['61_90'], parent_totals['91_over'], parent_totals['total']
-                            )
-                            customers.append(parent_row)
-                            self.customer_id += 1
-                            print(f"[AR-PARSER] Completed parent customer: {current_parent}")
-                            current_parent = None
-                            sub_customers = []
-                            parent_totals = {'current': 0.0, '1_30': 0.0, '31_60': 0.0, '61_90': 0.0, '91_over': 0.0, 'total': 0.0}
+                    # Skip page footer (e.g. "Wednesday, March 04, 2026 ... GMTZ 2/2").
+                    if 'GMTZ' in name or re.search(r'\b\d+/\d+\b', name):
                         continue
 
-                    amounts = re.findall(r'[\d,]+\.\d{2}', line)
-
-                    customer_line = line
-                    for amt in amounts:
-                        customer_line = customer_line.replace(amt, '', 1)
-                    customer_name = customer_line.strip()
-
-                    if len(amounts) == 6:
-                        current = self.parse_amount(amounts[0])
-                        days_1_30 = self.parse_amount(amounts[1])
-                        days_31_60 = self.parse_amount(amounts[2])
-                        days_61_90 = self.parse_amount(amounts[3])
-                        days_91_over = self.parse_amount(amounts[4])
-                        total = self.parse_amount(amounts[5])
-                    elif len(amounts) == 2:
-                        current = 0.0
-                        days_1_30 = 0.0
-                        days_31_60 = 0.0
-                        days_61_90 = 0.0
-                        days_91_over = self.parse_amount(amounts[0])
-                        total = self.parse_amount(amounts[1])
-                    elif len(amounts) == 1:
-                        current = 0.0
-                        days_1_30 = 0.0
-                        days_31_60 = 0.0
-                        days_61_90 = 0.0
-                        days_91_over = 0.0
-                        total = self.parse_amount(amounts[0])
-                    else:
-                        if amounts:
-                            print(f"[AR-PARSER] Skipping line with {len(amounts)} amounts: {line[:50]}")
+                    if not name and not amounts:
                         continue
 
-                    if total == 0.0 and not amounts:
-                        if current_parent and sub_customers:
-                            parent_row = self.create_parent_customer_row(
-                                current_parent, str(self.customer_id), sub_customers,
-                                parent_totals['current'], parent_totals['1_30'], parent_totals['31_60'],
-                                parent_totals['61_90'], parent_totals['91_over'], parent_totals['total']
-                            )
-                            customers.append(parent_row)
-                            self.customer_id += 1
-                            sub_customers = []
-                            parent_totals = {'current': 0.0, '1_30': 0.0, '31_60': 0.0, '61_90': 0.0, '91_over': 0.0, 'total': 0.0}
-                        current_parent = customer_name
-                        print(f"[AR-PARSER] Starting parent customer: {customer_name}")
-                        continue
+                    lines.append({'name': name, 'amounts': amounts})
+        return lines
 
-                    is_sub = line[0] == ' ' if line else False
+    def parse_pdf(self, filepath: Path) -> Dict[str, Any]:
+        """Parse PDF file and convert to QuickBooks JSON format.
 
-                    if current_parent or is_sub:
-                        sub_row = self.create_sub_customer_row(
-                            customer_name, str(self.customer_id),
-                            current, days_1_30, days_31_60, days_61_90, days_91_over, total
-                        )
-                        sub_customers.append(sub_row)
-                        self.customer_id += 1
-                        parent_totals['current'] += current
-                        parent_totals['1_30'] += days_1_30
-                        parent_totals['31_60'] += days_31_60
-                        parent_totals['61_90'] += days_61_90
-                        parent_totals['91_over'] += days_91_over
-                        parent_totals['total'] += total
-                        print(f"[AR-PARSER] Added sub-customer: {customer_name} (${total})")
-                    else:
-                        customer_row = self.create_customer_row(
-                            customer_name, str(self.customer_id),
-                            current, days_1_30, days_31_60, days_61_90, days_91_over, total
-                        )
-                        customers.append(customer_row)
-                        self.customer_id += 1
-                        print(f"[AR-PARSER] Added customer: {customer_name} (${total})")
+        Mirrors the parent/sub-customer structure produced by parse_csv /
+        parse_xlsx so downstream consumers see an identical envelope.
+        """
+        self.check_pdf_support()
 
-        if current_parent and sub_customers:
-            parent_row = self.create_parent_customer_row(
-                current_parent, str(self.customer_id), sub_customers,
-                parent_totals['current'], parent_totals['1_30'], parent_totals['31_60'],
-                parent_totals['61_90'], parent_totals['91_over'], parent_totals['total']
-            )
-            customers.append(parent_row)
-            self.customer_id += 1
+        raw_lines = self._extract_pdf_lines(filepath)
+
+        # Merge name-wrap lines: an amount-less line that is NOT a group header
+        # (i.e. not followed by sub-rows ending in "Total for") is the wrapped
+        # tail of the line above it.
+        def is_group_header(idx: int) -> bool:
+            for j in range(idx + 1, len(raw_lines)):
+                nxt = raw_lines[j]['name']
+                if nxt.startswith('Total for'):
+                    return True
+                if not raw_lines[j]['amounts']:
+                    # Another amount-less line before any "Total for" -> not a header.
+                    return False
+            return False
+
+        merged: List[Dict[str, Any]] = []
+        for i, line in enumerate(raw_lines):
+            name, amounts = line['name'], line['amounts']
+            if (not amounts and name and merged
+                    and not name.startswith('Total for')
+                    and name.upper() != 'TOTAL'
+                    and not is_group_header(i)
+                    and not merged[-1]['name'].startswith('Total for')
+                    and merged[-1]['name'].upper() != 'TOTAL'):
+                # Only merge into the previous line if that line is itself an
+                # amount-less group header awaiting its name tail, OR a plain
+                # data/customer line whose name wrapped. We never merge into a
+                # "Total for" / "TOTAL" line.
+                merged[-1]['name'] = f"{merged[-1]['name']} {name}".strip()
+                # If the previous line had amounts it was a data row whose name
+                # wrapped; keep its amounts. If it was amount-less it stays a
+                # header candidate. Re-evaluation of headers happens below.
+                continue
+            merged.append({'name': name, 'amounts': dict(amounts)})
+
+        customers: List[Dict[str, Any]] = []
+        totals = {'current': 0.0, '1_30': 0.0, '31_60': 0.0, '61_90': 0.0, '91_over': 0.0, 'total': 0.0}
+        current_parent: Optional[str] = None
+        sub_customers: List[Dict[str, Any]] = []
+        parent_totals = {'current': 0.0, '1_30': 0.0, '31_60': 0.0, '61_90': 0.0, '91_over': 0.0, 'total': 0.0}
+
+        def flush_parent():
+            nonlocal current_parent, sub_customers, parent_totals
+            if current_parent and sub_customers:
+                parent_row = self.create_parent_customer_row(
+                    current_parent, str(self.customer_id), sub_customers,
+                    parent_totals['current'], parent_totals['1_30'], parent_totals['31_60'],
+                    parent_totals['61_90'], parent_totals['91_over'], parent_totals['total']
+                )
+                customers.append(parent_row)
+                self.customer_id += 1
+            current_parent = None
+            sub_customers = []
+            parent_totals = {'current': 0.0, '1_30': 0.0, '31_60': 0.0, '61_90': 0.0, '91_over': 0.0, 'total': 0.0}
+
+        for line in merged:
+            name = line['name']
+            amounts = line['amounts']
+
+            if not name:
+                continue
+
+            if name.upper() == 'TOTAL':
+                totals['current'] = amounts.get('current', 0.0)
+                totals['1_30'] = amounts.get('1_30', 0.0)
+                totals['31_60'] = amounts.get('31_60', 0.0)
+                totals['61_90'] = amounts.get('61_90', 0.0)
+                totals['91_over'] = amounts.get('91_over', 0.0)
+                totals['total'] = amounts.get('total', 0.0)
+                break
+
+            if name.startswith('Total for '):
+                flush_parent()
+                continue
+
+            current = amounts.get('current', 0.0)
+            days_1_30 = amounts.get('1_30', 0.0)
+            days_31_60 = amounts.get('31_60', 0.0)
+            days_61_90 = amounts.get('61_90', 0.0)
+            days_91_over = amounts.get('91_over', 0.0)
+            total = amounts.get('total', 0.0)
+
+            # Amount-less line = a group/parent header (its children follow).
+            if not amounts:
+                flush_parent()
+                current_parent = name
+                continue
+
+            if current_parent:
+                sub_row = self.create_sub_customer_row(
+                    name, str(self.customer_id),
+                    current, days_1_30, days_31_60, days_61_90, days_91_over, total
+                )
+                sub_customers.append(sub_row)
+                self.customer_id += 1
+                parent_totals['current'] += current
+                parent_totals['1_30'] += days_1_30
+                parent_totals['31_60'] += days_31_60
+                parent_totals['61_90'] += days_61_90
+                parent_totals['91_over'] += days_91_over
+                parent_totals['total'] += total
+            else:
+                customer_row = self.create_customer_row(
+                    name, str(self.customer_id),
+                    current, days_1_30, days_31_60, days_61_90, days_91_over, total
+                )
+                customers.append(customer_row)
+                self.customer_id += 1
+
+        flush_parent()
 
         print(f"[AR-PARSER] Parsed {len(customers)} customer rows")
 

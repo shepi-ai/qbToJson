@@ -166,7 +166,7 @@ class CashFlowConverter(BaseConverter):
                     current_section = 'financing'
                     in_adjustments = False
                     continue
-                elif 'Adjustments to reconcile' in line_item:
+                elif 'Adjustments to reconcile' in line_item and not line_item.startswith('Total for'):
                     in_adjustments = True
                     continue
                 elif 'Total for Adjustments' in line_item:
@@ -646,7 +646,7 @@ class CashFlowConverter(BaseConverter):
                 current_section = 'financing'
                 in_adjustments = False
                 continue
-            elif 'Adjustments to reconcile' in line_item:
+            elif 'Adjustments to reconcile' in line_item and not line_item.startswith('Total for'):
                 in_adjustments = True
                 continue
             elif 'Total for Adjustments' in line_item:
@@ -739,181 +739,262 @@ class CashFlowConverter(BaseConverter):
 
         return self.build_cash_flow_json(months, data_by_month)
 
+    # ──────────────────────────────────────────────────────────────────────
+    # PDF parsing helpers
+    #
+    # QB exports the multi-month Statement of Cash Flows as a border-less,
+    # wide report that is split across pages HORIZONTALLY: each page covers a
+    # subset of the months but repeats EVERY line item. Plain text extraction
+    # collapses empty month columns, so values land in the wrong month. We
+    # instead work from word positions: every amount is right-aligned under its
+    # month column, so we snap each amount to the column whose right edge it is
+    # closest to. Months are then stitched together across pages by month key.
+    # ──────────────────────────────────────────────────────────────────────
+
+    _PDF_MONTH_NAMES = ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE',
+                        'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER']
+
+    # An amount: optional sign / $ / parens, thousands-separated, two decimals.
+    _PDF_AMOUNT_RE = re.compile(r'^-?\$?\(?-?[\d,]+\.\d{2}\)?\$?$')
+
+    @classmethod
+    def _pdf_is_amount(cls, text: str) -> bool:
+        return bool(cls._PDF_AMOUNT_RE.match(text.strip()))
+
+    @staticmethod
+    def _pdf_group_lines(words: List[Dict[str, Any]], tol: float = 3.0) -> List[List[Dict[str, Any]]]:
+        """Cluster extracted words into visual lines by vertical position."""
+        lines: List[List[Dict[str, Any]]] = []
+        for w in sorted(words, key=lambda x: (round(x['top']), x['x0'])):
+            placed = False
+            for line in lines:
+                if abs(line[0]['top'] - w['top']) <= tol:
+                    line.append(w)
+                    placed = True
+                    break
+            if not placed:
+                lines.append([w])
+        for line in lines:
+            line.sort(key=lambda x: x['x0'])
+        lines.sort(key=lambda ln: ln[0]['top'])
+        return lines
+
+    def _pdf_build_columns(self, lines: List[List[Dict[str, Any]]]) -> Tuple[Optional[List[Dict[str, Any]]], Optional[float], int]:
+        """Locate the "FULL NAME ... <months>" header and return month columns.
+
+        QB right-aligns every amount under its month's year token, so we use the
+        right edge (x1) of the year token as that column's anchor. Years may be
+        inline ("MAY 2023") on the header line or wrapped onto the line below
+        ("JANUARY" on the header, "2023" beneath it); we collect 4-digit year
+        tokens from both lines, sort by x1, and pair them with the month-name
+        words (sorted by x0) in left-to-right order. The optional grand-total
+        column ("TOTAL") is returned separately so its amounts can be ignored.
+        """
+        header_idx = -1
+        for i, line in enumerate(lines):
+            joined = ' '.join(w['text'] for w in line).upper()
+            if 'FULL' in joined and 'NAME' in joined:
+                header_idx = i
+                break
+        if header_idx == -1:
+            return None, None, -1
+
+        header = lines[header_idx]
+        year_line = lines[header_idx + 1] if header_idx + 1 < len(lines) else []
+
+        month_words = [w for w in header if w['text'].upper() in self._PDF_MONTH_NAMES]
+        month_words.sort(key=lambda w: w['x0'])
+
+        year_words = [w for w in header if re.fullmatch(r'\d{4}', w['text'])]
+        year_words += [w for w in year_line if re.fullmatch(r'\d{4}', w['text'])]
+        year_words.sort(key=lambda w: w['x1'])
+
+        columns: List[Dict[str, Any]] = []
+        for month_word, year_word in zip(month_words, year_words):
+            month_num = self._PDF_MONTH_NAMES.index(month_word['text'].upper()) + 1
+            year = int(year_word['text'])
+            month_str, start_date, end_date = self.parse_month_column(f"{month_word['text']} {year}")
+            columns.append({
+                'month': month_str,
+                'start_date': start_date,
+                'end_date': end_date,
+                'x1': year_word['x1'],
+            })
+
+        total_words = [w for w in header if w['text'].upper() == 'TOTAL']
+        total_x1 = total_words[0]['x1'] if total_words else None
+
+        return columns, total_x1, header_idx
+
     def parse_pdf(self, filepath: Path) -> List[Dict[str, Any]]:
-        """Parse PDF file and convert to cash flow JSON"""
+        """Parse PDF file and convert to cash flow JSON.
+
+        Stitches the horizontally-split, multi-page QB report back together by
+        snapping each right-aligned amount to its month column and keying all
+        data by month so the same line item collected across pages merges.
+        """
         if not PDF_SUPPORT:
             raise ImportError("pdfplumber is required for PDF support. Install with: pip install pdfplumber")
 
         import pdfplumber
-        with pdfplumber.open(filepath) as pdf:
-            # Extract text from all pages
-            all_text = ""
-            for page in pdf.pages:
-                text = page.extract_text()
-                if text:
-                    all_text += text + "\n"
 
-            # Split into lines for processing
-            lines = all_text.split('\n')
+        data_by_month: Dict[str, Dict[str, Any]] = {}
+        # Preserve chronological discovery order across pages for cash roll-forward.
+        month_order: List[str] = []
 
-            # Find header line with months or "Full name"
-            header_idx = -1
-            for i, line in enumerate(lines):
-                line_upper = line.upper()
-                # Look for either months or "Full name" pattern
-                if ('FULL NAME' in line_upper or
-                    any(month in line_upper for month in ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY'])):
-                    header_idx = i
-                    break
-
-            if header_idx == -1:
-                raise ValueError("Could not find header row in PDF")
-
-            # Parse months from header
-            header_line = lines[header_idx]
-            months = []
-            month_columns = []
-
-            # Extract month names and positions
-            # Find all month patterns
-            month_pattern = r'(?i)(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+\d{4}|[A-Z]{3}\s+\d+\s*-\s*[A-Z]{3}\s+\d+\s+\d{4}'
-            matches = list(re.finditer(month_pattern, header_line, re.IGNORECASE))
-
-            for i, match in enumerate(matches):
-                month_text = match.group()
-                month_str, start_date, end_date = self.parse_month_column(month_text)
-                months.append(month_str)
-                month_columns.append({
-                    'text': month_text,
-                    'month': month_str,
-                    'start_date': start_date,
-                    'end_date': end_date,
-                    'start_pos': match.start(),
-                    'end_pos': match.end()
-                })
-
-            # Initialize data structure
-            data_by_month = {}
-            for month_info in month_columns:
-                data_by_month[month_info['month']] = {
-                    'start_date': month_info['start_date'],
-                    'end_date': month_info['end_date'],
+        def ensure_month(col: Dict[str, Any]) -> str:
+            month = col['month']
+            if month not in data_by_month:
+                data_by_month[month] = {
+                    'start_date': col['start_date'],
+                    'end_date': col['end_date'],
                     'operating': {
                         'net_income': None,
                         'adjustments': {},
                         'total_adjustments': 0.0,
-                        'net_cash': 0.0
+                        'net_cash': 0.0,
                     },
-                    'investing': {
-                        'items': {},
-                        'net_cash': 0.0
-                    },
-                    'financing': {
-                        'items': {},
-                        'net_cash': 0.0
-                    },
+                    'investing': {'items': {}, 'net_cash': 0.0},
+                    'financing': {'items': {}, 'net_cash': 0.0},
                     'net_increase': 0.0,
                     'beginning_cash': 0.0,
-                    'ending_cash': 0.0
+                    'ending_cash': 0.0,
                 }
+            return month
 
-            # Parse data lines
-            current_section = None
-            in_adjustments = False
-            running_cash = 0.0
-
-            for line_idx in range(header_idx + 1, len(lines)):
-                line = lines[line_idx].strip()
-
-                if not line or 'Page' in line:
+        with pdfplumber.open(filepath) as pdf:
+            for page in pdf.pages:
+                words = page.extract_words()
+                if not words:
                     continue
 
-                # Extract line item name (before numbers)
-                number_match = re.search(r'[\d,\.\-\$\s]+$', line)
-                if number_match:
-                    line_item = line[:number_match.start()].strip()
-                    values_part = number_match.group()
-                else:
-                    line_item = line
-                    values_part = ""
-
-                if not line_item:
+                lines = self._pdf_group_lines(words)
+                columns, total_x1, header_idx = self._pdf_build_columns(lines)
+                if not columns:
                     continue
 
-                # Determine section
-                if 'OPERATING ACTIVITIES' in line_item:
-                    current_section = 'operating'
-                    in_adjustments = False
-                    continue
-                elif 'INVESTING ACTIVITIES' in line_item:
-                    current_section = 'investing'
-                    in_adjustments = False
-                    continue
-                elif 'FINANCING ACTIVITIES' in line_item:
-                    current_section = 'financing'
-                    in_adjustments = False
-                    continue
-                elif 'Adjustments to reconcile' in line_item:
-                    in_adjustments = True
-                    continue
+                anchors = [c['x1'] for c in columns]
+                for col in columns:
+                    month = ensure_month(col)
+                    if month not in month_order:
+                        month_order.append(month)
 
-                # Parse values for each month
-                if values_part and current_section:
-                    # Extract all numbers from the values part
-                    numbers = re.findall(r'[\-\$]?[\d,]+\.?\d*', values_part)
+                def snap(amount_word: Dict[str, Any]) -> Optional[int]:
+                    """Return the index of the month column this amount belongs to.
 
-                    # Try to match numbers to months
-                    for i, month_info in enumerate(month_columns):
-                        if i < len(numbers):
-                            value_str = numbers[i].replace('$', '').replace(',', '')
-                            try:
-                                value = float(value_str)
-                            except ValueError:
-                                continue
+                    Snaps to the nearest column right edge; returns None when the
+                    amount is closest to the grand-total column (which we drop).
+                    """
+                    x1 = amount_word['x1']
+                    best = min(range(len(anchors)), key=lambda i: abs(anchors[i] - x1))
+                    if total_x1 is not None and abs(total_x1 - x1) < abs(anchors[best] - x1):
+                        return None
+                    return best
 
-                            month = month_info['month']
+                current_section = None
+                in_adjustments = False
 
-                            if 'Net cash provided by' in line_item:
-                                if current_section == 'operating':
-                                    data_by_month[month]['operating']['net_cash'] = value
-                                elif current_section == 'investing':
-                                    data_by_month[month]['investing']['net_cash'] = value
-                                elif current_section == 'financing':
-                                    data_by_month[month]['financing']['net_cash'] = value
-                            elif 'NET CASH INCREASE' in line_item or 'Net cash increase' in line_item:
-                                data_by_month[month]['net_increase'] = value
-                                # Calculate cash positions
-                                if i == 0:
-                                    data_by_month[month]['beginning_cash'] = 0.0
-                                    data_by_month[month]['ending_cash'] = value
-                                    running_cash = value
-                                else:
-                                    data_by_month[month]['beginning_cash'] = running_cash
-                                    data_by_month[month]['ending_cash'] = running_cash + value
-                                    running_cash = running_cash + value
-                            elif 'Total for Adjustments' in line_item or 'Total Adjustments' in line_item:
-                                data_by_month[month]['operating']['total_adjustments'] = value
-                            elif current_section == 'operating':
-                                if line_item == 'Net Income':
-                                    data_by_month[month]['operating']['net_income'] = value
-                                elif in_adjustments:
-                                    account_id = self.get_or_create_account_id(line_item)
-                                    data_by_month[month]['operating']['adjustments'][line_item] = {
-                                        'value': value,
-                                        'id': account_id
-                                    }
+                # Start right after the header. A wrapped year sub-header line
+                # ("2023 2023 ...") is skipped by the furniture filter below;
+                # we do not blindly skip a fixed number of lines because some
+                # pages carry their years inline on the header itself.
+                for line in lines[header_idx + 1:]:
+                    amount_words = [w for w in line if self._pdf_is_amount(w['text'])]
+                    name_words = [w for w in line if not self._pdf_is_amount(w['text'])]
+                    line_item = ' '.join(w['text'] for w in name_words).strip()
+
+                    # Skip report furniture (footer with timestamp / GMTZ, year
+                    # sub-header rows, blank lines).
+                    if not line_item and not amount_words:
+                        continue
+                    if 'GMTZ' in line_item.upper():
+                        continue
+                    if re.fullmatch(r'(\d{4} ?)+', line_item):
+                        continue
+
+                    # Section transitions (these rows carry no amounts).
+                    if 'OPERATING ACTIVITIES' in line_item:
+                        current_section = 'operating'
+                        in_adjustments = False
+                        continue
+                    elif 'INVESTING ACTIVITIES' in line_item:
+                        current_section = 'investing'
+                        in_adjustments = False
+                        continue
+                    elif 'FINANCING ACTIVITIES' in line_item:
+                        current_section = 'financing'
+                        in_adjustments = False
+                        continue
+
+                    # The adjustments header may share a line with amounts only
+                    # for its "Total for ..." variant; the plain header has none.
+                    is_total_adjustments = line_item.startswith('Total for Adjustments') or 'Total Adjustments' in line_item
+                    if 'Adjustments to reconcile' in line_item and not is_total_adjustments:
+                        in_adjustments = True
+                        # Header line itself has no amounts; nothing to place.
+                        if not amount_words:
+                            continue
+
+                    if not amount_words:
+                        # A wrapped name/label tail with no values; nothing to place.
+                        continue
+
+                    is_net_cash = line_item.startswith('Net cash provided by')
+                    is_net_increase = 'NET CASH INCREASE' in line_item.upper() or 'Net cash increase' in line_item
+
+                    for amount_word in amount_words:
+                        col_idx = snap(amount_word)
+                        if col_idx is None:
+                            continue
+                        month = columns[col_idx]['month']
+                        value = self.parse_amount(amount_word['text'])
+
+                        if is_net_cash:
+                            if current_section == 'operating':
+                                data_by_month[month]['operating']['net_cash'] = value
                             elif current_section == 'investing':
-                                account_id = self.get_or_create_account_id(line_item)
-                                data_by_month[month]['investing']['items'][line_item] = {
-                                    'value': value,
-                                    'id': account_id
-                                }
+                                data_by_month[month]['investing']['net_cash'] = value
                             elif current_section == 'financing':
+                                data_by_month[month]['financing']['net_cash'] = value
+                        elif is_net_increase:
+                            data_by_month[month]['net_increase'] = value
+                        elif is_total_adjustments:
+                            data_by_month[month]['operating']['total_adjustments'] = value
+                        elif current_section == 'operating':
+                            if line_item == 'Net Income':
+                                data_by_month[month]['operating']['net_income'] = value
+                            elif in_adjustments:
                                 account_id = self.get_or_create_account_id(line_item)
-                                data_by_month[month]['financing']['items'][line_item] = {
+                                data_by_month[month]['operating']['adjustments'][line_item] = {
                                     'value': value,
-                                    'id': account_id
+                                    'id': account_id,
                                 }
+                        elif current_section == 'investing':
+                            account_id = self.get_or_create_account_id(line_item)
+                            data_by_month[month]['investing']['items'][line_item] = {
+                                'value': value,
+                                'id': account_id,
+                            }
+                        elif current_section == 'financing':
+                            account_id = self.get_or_create_account_id(line_item)
+                            data_by_month[month]['financing']['items'][line_item] = {
+                                'value': value,
+                                'id': account_id,
+                            }
+
+        # Roll cash balances forward in chronological month order, mirroring the
+        # CSV/XLSX parsers (first month begins at 0; each subsequent month opens
+        # at the prior month's ending balance).
+        months = sorted(data_by_month.keys())
+        running_cash = 0.0
+        for idx, month in enumerate(months):
+            increase = data_by_month[month]['net_increase']
+            if idx == 0:
+                data_by_month[month]['beginning_cash'] = 0.0
+            else:
+                data_by_month[month]['beginning_cash'] = running_cash
+            running_cash = data_by_month[month]['beginning_cash'] + increase
+            data_by_month[month]['ending_cash'] = running_cash
 
         return self.build_cash_flow_json(months, data_by_month)
 

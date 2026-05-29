@@ -674,6 +674,23 @@ class TrialBalanceConverter(BaseConverter):
 
         return data_by_month
 
+    # ------------------------------------------------------------------
+    # PDF format detection
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _count_pdf_month_columns(first_page_text: str) -> int:
+        """Count distinct month-year column headers in the PDF header line.
+
+        QB wide trial balances use full month names ("JANUARY 2023") in the
+        header row, while single-month reports only carry an "As of <date>"
+        line (no month-year column headers). This counts month-year tokens so
+        detection can route multi-month PDFs to the columnar parser.
+        """
+        month_year_pattern = (
+            r'(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+\d{4}'
+        )
+        return len(re.findall(month_year_pattern, first_page_text.upper()))
+
     def parse_pdf_data(self, filepath: Path) -> Dict[str, Dict[str, Any]]:
         """Parse PDF file and extract trial balance data by month"""
         self.check_pdf_support()
@@ -682,151 +699,333 @@ class TrialBalanceConverter(BaseConverter):
         with pdfplumber.open(filepath) as pdf:
             first_page_text = pdf.pages[0].extract_text() if pdf.pages else ""
 
-            # Check if it's single-month format
-            if "As of" in first_page_text and "DEBIT" in first_page_text.upper() and "CREDIT" in first_page_text.upper():
-                # Check if it's NOT multi-month (no multiple month names with years)
-                month_year_pattern = r'(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s+\d{4}'
-                month_matches = re.findall(month_year_pattern, first_page_text.upper())
+        # Single-month reports carry "As of <date>" plus DEBIT/CREDIT but have
+        # fewer than 2 month-year column headers. Multi-month wide reports have
+        # many month-year headers (e.g. "JANUARY 2023 FEBRUARY 2023 ...").
+        month_col_count = self._count_pdf_month_columns(first_page_text)
+        has_debit_credit = (
+            "DEBIT" in first_page_text.upper() and "CREDIT" in first_page_text.upper()
+        )
 
-                if len(month_matches) < 2:  # Single month or no months found
-                    print(f"[DEBUG] Detected single-month PDF format", file=sys.stderr)
-                    return self.parse_single_month_pdf(filepath)
+        if month_col_count < 2 and "As of" in first_page_text and has_debit_credit:
+            print(f"[DEBUG] Detected single-month PDF format", file=sys.stderr)
+            return self.parse_single_month_pdf(filepath)
 
-        # Fall back to multi-month parser
-        print(f"[DEBUG] Using multi-month PDF parser", file=sys.stderr)
-        data_by_month = {}
+        # Multi-month columnar parser (word-position / x-snapping based).
+        print(
+            f"[DEBUG] Using multi-month PDF parser (month_col_count={month_col_count})",
+            file=sys.stderr,
+        )
+        return self._parse_multi_month_pdf(filepath)
+
+    # ------------------------------------------------------------------
+    # Multi-month wide trial balance PDF parser
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _cluster_words_into_rows(words: List[Dict[str, Any]], tol: float = 3.0) -> List[List[Dict[str, Any]]]:
+        """Group extracted words into visual rows by their 'top' coordinate."""
+        rows: List[List[Dict[str, Any]]] = []
+        for w in sorted(words, key=lambda w: (w['top'], w['x0'])):
+            placed = False
+            for row in rows:
+                if abs(row[0]['top'] - w['top']) <= tol:
+                    row.append(w)
+                    placed = True
+                    break
+            if not placed:
+                rows.append([w])
+        # Sort each row left-to-right and order rows top-to-bottom
+        for row in rows:
+            row.sort(key=lambda w: w['x0'])
+        rows.sort(key=lambda r: min(w['top'] for w in r))
+        return rows
+
+    @staticmethod
+    def _is_amount_token(text: str) -> bool:
+        """Return True if a token is a numeric amount (handles commas/parens/$)."""
+        cleaned = text.strip().replace(',', '').replace('$', '')
+        cleaned = cleaned.replace('(', '').replace(')', '').replace('-', '', 1)
+        if cleaned in ('', '.'):
+            return False
+        return bool(re.fullmatch(r'\d*\.?\d+', cleaned))
+
+    @staticmethod
+    def _parse_amount(text: str) -> float:
+        """Parse a numeric amount token (parentheses => negative)."""
+        t = text.strip()
+        negative = t.startswith('(') and t.endswith(')')
+        cleaned = t.replace(',', '').replace('$', '').replace('(', '').replace(')', '')
+        try:
+            val = float(cleaned)
+        except ValueError:
+            return 0.0
+        return -val if negative else val
+
+    def _parse_multi_month_pdf(self, filepath: Path) -> Dict[str, Dict[str, Any]]:
+        """Parse a wide multi-month QB trial balance PDF.
+
+        The report is split into horizontal page-groups (each covering a subset
+        of months for all accounts) and accounts within a group can also span
+        multiple pages vertically. The same accounts repeat across page-groups,
+        so months are stitched together by aggregating per-month data keyed by
+        (year, month). Each month has a DEBIT and a CREDIT sub-column; amounts
+        are snapped to columns by their right edge (x1) versus the per-page
+        DEBIT/CREDIT header positions.
+        """
+        data_by_month: Dict[str, Dict[str, Any]] = {}
+        # Track which accounts already recorded for each month to avoid dupes
+        # when an account repeats across pages/page-groups.
+        seen: Dict[str, set] = {}
+
+        # Page furniture lines to ignore. Matched as whole-line/prefix patterns
+        # (NOT substrings) so legitimate account names that merely contain a
+        # word like "Balance" (e.g. "Opening Balance Equity") are NOT dropped.
+        def _is_furniture(name: str) -> bool:
+            up = name.strip().upper()
+            if up in ('TRIAL BALANCE', 'FULL NAME', 'DEBIT', 'CREDIT',
+                      'DEBIT CREDIT'):
+                return True
+            if up.startswith('AS OF '):
+                return True
+            if up.startswith('ACCRUAL'):
+                # Footer "Accrual Basis <date> GMTZ" line. The name-column words
+                # are typically just "Accrual" (the rest sits in the number
+                # columns). No real account name begins with "Accrual".
+                return True
+            # Footer date stamp lines and timezone markers.
+            if 'GMTZ' in up:
+                return True
+            return False
 
         with pdfplumber.open(filepath) as pdf:
             for page in pdf.pages:
-                # Try to extract tables first
-                tables = page.extract_tables()
-
-                if tables:
-                    # Process table data (existing code for table extraction)
-                    pass  # Keep existing table extraction code
-
-                # Always try text extraction for columnar PDFs
-                text = page.extract_text()
-                if not text:
+                words = page.extract_words(use_text_flow=False, keep_blank_chars=False)
+                if not words:
                     continue
 
-                lines = text.split('\n')
+                rows = self._cluster_words_into_rows(words)
 
-                # Find the header line with months
-                month_line_idx = -1
-                for i, line in enumerate(lines):
-                    if 'JAN 2025' in line and 'FEB 2025' in line:
-                        month_line_idx = i
+                # Locate the month-header row and the DEBIT/CREDIT row.
+                month_row = None
+                dc_row = None
+                dc_row_index = -1
+                for idx, row in enumerate(rows):
+                    texts_upper = [w['text'].upper() for w in row]
+                    joined = ' '.join(texts_upper)
+                    if month_row is None and re.search(
+                        r'(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|'
+                        r'SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+\d{4}', joined
+                    ):
+                        month_row = row
+                    if dc_row is None and 'DEBIT' in texts_upper and 'CREDIT' in texts_upper:
+                        dc_row = row
+                        dc_row_index = idx
+                    if month_row is not None and dc_row is not None:
                         break
 
-                if month_line_idx == -1:
+                if month_row is None or dc_row is None:
                     continue
 
-                # Extract month positions from the header line
-                month_line = lines[month_line_idx]
-                month_positions = []
+                # Build ordered month list from month-header row. Each month is
+                # "<MonthName> <Year>" formed from adjacent tokens; record its
+                # horizontal center so we can map DEBIT/CREDIT columns to it.
+                months: List[Dict[str, Any]] = []
+                mw = month_row
+                i = 0
+                while i < len(mw):
+                    txt = mw[i]['text']
+                    if re.fullmatch(
+                        r'(?i)(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|'
+                        r'SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)', txt
+                    ) and i + 1 < len(mw) and re.fullmatch(r'\d{4}', mw[i + 1]['text']):
+                        month, year, start_date, end_date = self.parse_month_year(
+                            f"{txt} {mw[i + 1]['text']}"
+                        )
+                        center = (mw[i]['x0'] + mw[i + 1]['x1']) / 2.0
+                        months.append({
+                            'month': month, 'year': year,
+                            'start_date': start_date, 'end_date': end_date,
+                            'center': center,
+                        })
+                        i += 2
+                    else:
+                        i += 1
 
-                # Find each month and its position
-                for match in re.finditer(r'(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s+(\d{4})', month_line):
-                    month_name = match.group(1)
-                    year = match.group(2)
-                    month, year_str, start_date, end_date = self.parse_month_year(f"{month_name} {year}")
+                if not months:
+                    continue
 
-                    month_positions.append({
-                        'month': month,
-                        'year': year_str,
-                        'start_date': start_date,
-                        'end_date': end_date,
-                        'start_pos': match.start(),
-                        'end_pos': match.end()
+                # Build DEBIT/CREDIT column edges (use right edge x1 for snapping
+                # since amounts are right-aligned).
+                debit_cols = sorted(
+                    [w['x1'] for w in dc_row if w['text'].upper() == 'DEBIT']
+                )
+                credit_cols = sorted(
+                    [w['x1'] for w in dc_row if w['text'].upper() == 'CREDIT']
+                )
+
+                # Each month owns one debit edge + one credit edge, in order.
+                # Map them positionally (debit/credit alternate left-to-right).
+                columns = []  # list of (x1_edge, month_index, is_debit)
+                for m_idx in range(len(months)):
+                    if m_idx < len(debit_cols):
+                        columns.append((debit_cols[m_idx], m_idx, True))
+                    if m_idx < len(credit_cols):
+                        columns.append((credit_cols[m_idx], m_idx, False))
+
+                if not columns:
+                    continue
+
+                # Initialise per-month storage.
+                for m in months:
+                    key = f"{m['year']}-{m['month']}"
+                    if key not in data_by_month:
+                        data_by_month[key] = {
+                            'month': m['month'], 'year': m['year'],
+                            'start_date': m['start_date'], 'end_date': m['end_date'],
+                            'accounts': [], 'total_debit': 0.0, 'total_credit': 0.0,
+                        }
+                        seen[key] = set()
+
+                # Right edges of every numeric column, used to recognise amount
+                # tokens by snapping their right edge (x1). This avoids a fixed
+                # name/amount x-boundary, which mis-classifies wide 7-digit
+                # values (e.g. "1,106,897.08") whose left edge creeps into the
+                # name zone.
+                col_edges = [c[0] for c in columns]
+                snap_tol = 6.0  # right edges are very stable per page
+
+                def _classify_row(row):
+                    """Split a visual row into (amount_words, name_words).
+
+                    A token is an amount if it parses as a number AND its right
+                    edge snaps to a numeric-column right edge. Everything to the
+                    left of the first amount token is the account name.
+                    """
+                    amts = []
+                    for w in row:
+                        if self._is_amount_token(w['text']):
+                            nearest = min(col_edges, key=lambda e: abs(e - w['x1']))
+                            if abs(nearest - w['x1']) <= snap_tol:
+                                amts.append(w)
+                    if amts:
+                        first_amt_x0 = min(w['x0'] for w in amts)
+                        names = [
+                            w for w in row
+                            if w['x1'] <= first_amt_x0 and w not in amts
+                        ]
+                    else:
+                        names = list(row)
+                    return amts, names
+
+                # ---- Step 1: turn raw visual rows into clean account rows. ----
+                # Each entry: {'name': str, 'amounts': [word, ...], 'top': float}.
+                # QB wraps long account names onto a second visual line at the
+                # same left margin with a SMALLER vertical gap than a normal
+                # inter-row gap. We detect wraps by comparing each name-only
+                # row's gap-to-previous against the page's typical row gap, and
+                # merge the fragment into the preceding account name. A blank
+                # account (name with no amounts here, but values elsewhere) has
+                # a normal gap and is treated as its own row.
+                data_rows = []  # list of dict(name, name_words, amount_words, top)
+                for row in rows[dc_row_index + 1:]:
+                    amount_words, name_words = _classify_row(row)
+                    name_text = ' '.join(w['text'] for w in name_words).strip()
+                    upper_name = name_text.upper()
+
+                    if upper_name.startswith('TOTAL'):
+                        break
+                    if not name_text and not amount_words:
+                        continue
+                    if _is_furniture(name_text):
+                        continue
+                    if not amount_words and re.fullmatch(r'\d+/\d+', name_text):
+                        continue
+                    if not name_text:
+                        # Amounts with no name column text -> cannot attribute.
+                        continue
+
+                    data_rows.append({
+                        'name': name_text,
+                        'amounts': amount_words,
+                        'top': min(w['top'] for w in name_words),
                     })
 
-                # Initialize data structure for each month
-                for month_info in month_positions:
-                    month_key = f"{month_info['year']}-{month_info['month']}"
-                    if month_key not in data_by_month:
-                        data_by_month[month_key] = {
-                            'month': month_info['month'],
-                            'year': month_info['year'],
-                            'start_date': month_info['start_date'],
-                            'end_date': month_info['end_date'],
-                            'accounts': [],
-                            'total_debit': 0.0,
-                            'total_credit': 0.0
-                        }
+                # Determine the typical (normal) inter-row gap for this page.
+                gaps = [
+                    data_rows[i]['top'] - data_rows[i - 1]['top']
+                    for i in range(1, len(data_rows))
+                ]
+                gaps_sorted = sorted(g for g in gaps if g > 0)
+                normal_gap = (
+                    gaps_sorted[len(gaps_sorted) // 2] if gaps_sorted else 12.7
+                )
 
-                # Parse account data (skip header lines)
-                data_start = month_line_idx + 2  # Skip month line and DEBIT/CREDIT line
+                # Merge wrapped continuation lines into their parent.
+                merged_rows = []
+                for i, dr in enumerate(data_rows):
+                    is_wrap = (
+                        i > 0
+                        and not dr['amounts']                       # fragment has no values
+                        and (dr['top'] - data_rows[i - 1]['top']) < normal_gap * 0.92
+                        and len(merged_rows) > 0
+                    )
+                    if is_wrap:
+                        merged_rows[-1]['name'] = (
+                            merged_rows[-1]['name'] + ' ' + dr['name']
+                        ).strip()
+                        merged_rows[-1]['amounts'].extend(dr['amounts'])
+                    else:
+                        merged_rows.append({
+                            'name': dr['name'],
+                            'amounts': list(dr['amounts']),
+                        })
 
-                for line_idx in range(data_start, len(lines)):
-                    line = lines[line_idx]
-                    if not line.strip() or 'TOTAL' in line.upper():
-                        continue
-
-                    # Extract account name (text before first number)
-                    match = re.match(r'^([A-Za-z\s\(\):/\.\-]+)', line)
-                    if not match:
-                        continue
-
-                    account_name = match.group(1).strip()
-                    if not account_name:
-                        continue
-
-                    # Get account ID
+                # ---- Step 2: snap amounts to columns and record per month. ----
+                for mr in merged_rows:
+                    account_name = mr['name']
                     account_id = self.get_or_create_account_id(account_name)
 
-                    # Extract all numbers from the line
-                    numbers = re.findall(r'[\d,]+\.?\d*', line)
+                    # Snap each amount to its nearest column by right edge (x1).
+                    # Track which columns actually had an amount token (a printed
+                    # "0.00" counts as present, matching CSV cell semantics).
+                    per_month = {m_idx: {'debit': 0.0, 'credit': 0.0,
+                                         'present': False}
+                                 for m_idx in range(len(months))}
+                    for aw in mr['amounts']:
+                        x1 = aw['x1']
+                        best = min(columns, key=lambda c: abs(c[0] - x1))
+                        # Reject if no column is reasonably close (>30pt off).
+                        if abs(best[0] - x1) > 30:
+                            continue
+                        _, m_idx, is_debit = best
+                        val = self._parse_amount(aw['text'])
+                        per_month[m_idx]['present'] = True
+                        if is_debit:
+                            per_month[m_idx]['debit'] += val
+                        else:
+                            per_month[m_idx]['credit'] += val
 
-                    # Assign numbers to months based on expected pattern
-                    # Each month should have 2 values (debit, credit), but some might be missing
-                    value_idx = 0
-
-                    for i, month_info in enumerate(month_positions):
-                        month_key = f"{month_info['year']}-{month_info['month']}"
-
-                        debit_value = 0.0
-                        credit_value = 0.0
-
-                        # Try to get values for this month
-                        if value_idx < len(numbers):
-                            # Some accounts might only have one value per month
-                            # We need to determine if it's debit or credit based on context
-                            try:
-                                value = float(numbers[value_idx].replace(',', ''))
-                                # For now, assume first value is debit unless it's a liability/equity account
-                                if any(keyword in account_name.upper() for keyword in ['PAYABLE', 'EQUITY', 'EARNINGS']):
-                                    credit_value = value
-                                else:
-                                    debit_value = value
-                                value_idx += 1
-
-                                # Check if there's a second value for this month
-                                if value_idx < len(numbers) and i < len(month_positions) - 1:
-                                    # Check if next value is likely for this month or next month
-                                    # This is heuristic-based
-                                    next_value = float(numbers[value_idx].replace(',', ''))
-                                    if next_value < value * 10:  # Likely same month
-                                        if debit_value > 0:
-                                            credit_value = next_value
-                                        else:
-                                            debit_value = next_value
-                                        value_idx += 1
-                            except (ValueError, IndexError):
-                                pass
-
-                        # Include all accounts (even zero-value) to match QB API output
-                        # Check if account already exists for this month
-                        existing = next((acc for acc in data_by_month[month_key]['accounts'] if acc['name'] == account_name), None)
-                        if not existing:
-                            data_by_month[month_key]['accounts'].append({
-                                'name': account_name,
-                                'id': account_id,
-                                'debit': debit_value,
-                                'credit': credit_value
-                            })
-                            data_by_month[month_key]['total_debit'] += debit_value
-                            data_by_month[month_key]['total_credit'] += credit_value
+                    # Record per month (dedup by account name within the month).
+                    for m_idx, m in enumerate(months):
+                        key = f"{m['year']}-{m['month']}"
+                        if account_name in seen[key]:
+                            continue
+                        # Only record accounts whose cell is present for this
+                        # month (matches CSV behaviour of including present cells,
+                        # including explicit 0.00).
+                        if not per_month[m_idx]['present']:
+                            continue
+                        debit_value = per_month[m_idx]['debit']
+                        credit_value = per_month[m_idx]['credit']
+                        data_by_month[key]['accounts'].append({
+                            'name': account_name,
+                            'id': account_id,
+                            'debit': debit_value,
+                            'credit': credit_value,
+                        })
+                        data_by_month[key]['total_debit'] += debit_value
+                        data_by_month[key]['total_credit'] += credit_value
+                        seen[key].add(account_name)
 
         return data_by_month
 
