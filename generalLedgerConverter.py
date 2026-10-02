@@ -415,16 +415,36 @@ class GeneralLedgerConverter(BaseConverter):
                 'end_date': header_end
             }
 
-    def create_transaction_row(self, transaction_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a transaction row object matching QuickBooks API format"""
+    def create_transaction_row(self, transaction_data: Dict[str, Any],
+                               account_name: str = '') -> Dict[str, Any]:
+        """Create a transaction row in the layout the saved reports actually use.
+
+        Verified against a stored record on 2026-10-02. A DATA row carries nine
+        cells, and the account repeats on every row as its *leaf* name while the
+        section header holds the fully qualified path:
+
+            [0] account leaf   [1] MM/DD/YYYY   [2] transaction type
+            [3] num            [4] name         [5] memo
+            [6] split          [7] amount       [8] transaction id
+
+        There is no balance column. Note that the report's own `columns`
+        metadata describes none of this -- it declares eight columns beginning
+        with the date and ending with a balance -- so it must not be used to
+        derive these indices. Reading it that way is what made a consumer parse
+        the Split string as an amount.
+        """
         tx_type = transaction_data.get('type', '')
         date_str = transaction_data.get('date', '')
 
-        # Convert date from MM/DD/YYYY to YYYY-MM-DD (ISO format matching QB API)
-        if date_str and '/' in date_str:
-            parts = date_str.split('/')
-            if len(parts) == 3:
-                date_str = f"{parts[2]}-{parts[0].zfill(2)}-{parts[1].zfill(2)}"
+        # Dates stay MM/DD/YYYY: that is what the readers parse. This previously
+        # converted to ISO, which no consumer accepts.
+        if date_str and '-' in date_str and '/' not in date_str:
+            parts = date_str.split('-')
+            if len(parts) == 3 and len(parts[0]) == 4:
+                date_str = f"{parts[1].zfill(2)}/{parts[2].zfill(2)}/{parts[0]}"
+
+        # The section header carries the full path; each row carries the leaf.
+        account_leaf = account_name.split(':')[-1] if account_name else ''
 
         # Beginning Balance: QB API puts it in colData[0] (Date field) with balance in colData[7]
         if tx_type == 'Beginning Balance':
@@ -456,6 +476,7 @@ class GeneralLedgerConverter(BaseConverter):
             "rows": None,
             "summary": None,
             "colData": [
+                {"attributes": None, "value": account_leaf, "id": None, "href": None},
                 {"attributes": None, "value": date_str, "id": None, "href": None},
                 {"attributes": None, "value": tx_type, "id": None, "href": None},
                 {"attributes": None, "value": transaction_data.get('num', ''), "id": None, "href": None},
@@ -463,9 +484,6 @@ class GeneralLedgerConverter(BaseConverter):
                 {"attributes": None, "value": transaction_data.get('memo', ''), "id": None, "href": None},
                 {"attributes": None, "value": transaction_data.get('split_account', ''), "id": None, "href": None},
                 {"attributes": None, "value": transaction_data.get('amount', ''), "id": None, "href": None},
-                {"attributes": None, "value": transaction_data.get('balance', ''), "id": None, "href": None},
-                # Appended rather than inserted: every existing reader indexes
-                # these cells by position and ignores anything past the last one.
                 {"attributes": None, "value": transaction_data.get('transaction_id', ''), "id": None, "href": None}
             ],
             "type": "DATA",
@@ -1653,7 +1671,7 @@ class GeneralLedgerConverter(BaseConverter):
 
                 # Parent's own direct transactions (in a headerless SECTION)
                 if account_info['transactions']:
-                    direct_txns = [self.create_transaction_row(t) for t in account_info['transactions']]
+                    direct_txns = [self.create_transaction_row(t, account_name) for t in account_info['transactions']]
                     inner_rows.append({
                         "id": None, "parentId": None, "header": None,
                         "rows": {"row": direct_txns}, "summary": None,
@@ -1689,7 +1707,7 @@ class GeneralLedgerConverter(BaseConverter):
                 }
             else:
                 # Leaf account - flat section
-                txn_rows = [self.create_transaction_row(t) for t in account_info['transactions']]
+                txn_rows = [self.create_transaction_row(t, account_name) for t in account_info['transactions']]
                 return self.create_account_section(
                     account_name, account_info['id'], txn_rows, account_info['total']
                 )

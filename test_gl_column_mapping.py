@@ -9,6 +9,7 @@ Reproduces the Milano Hospitality GL failures:
   - Silent column misalignment when a 'Distribution account' column is present
     (date/amount/balance were read from the wrong columns)
 """
+import re
 import tempfile
 from pathlib import Path
 
@@ -211,10 +212,92 @@ def test_currency_symbol_is_stripped_from_amount_and_balance():
     tx = c.extract_gl_transaction(row, colmap)
     assert tx['amount'] == '0.00'
     assert tx['balance'] == '-37,872.80'
-    assert c.create_transaction_row(tx)['colData'][6]['value'] == '0.00'
+    # AMOUNT is cell 7 in the stored layout; see TestStoredRowLayout below.
+    assert c.create_transaction_row(tx, 'Accounts Receivable (A/R)')['colData'][7]['value'] == '0.00'
 
 
 def test_negative_currency_amount_keeps_its_sign():
     c = GeneralLedgerConverter()
     assert c.gl_plain_number('-$137,888.32') == '-137,888.32'
     assert c.gl_plain_number('') == ''
+
+
+# ── Stored DATA row layout ────────────────────────────────────────────────────
+# Verified against a stored record on 2026-10-02. These indices are asserted by
+# name because the report's own `columns` metadata does NOT describe them: it
+# declares eight columns starting at the date and ending with a balance, with no
+# account column at all. A consumer that derived its indices from that metadata
+# read the Split string as an amount.
+ACCOUNT, DATE, TX_TYPE, NUM, NAME, MEMO, SPLIT, AMOUNT, TXID = range(9)
+
+_TXN = {
+    'date': '01/14/2023',
+    'type': 'Bill Payment (Check)',
+    'num': '1023',
+    'name': 'Hahn Group',
+    'memo': 'monthly service',
+    'split_account': 'Accounts Payable (A/P)',
+    'amount': '-891.20',
+    'balance': '150209.78',
+    'transaction_id': '1412',
+}
+
+
+def _cells(account_name='Landscaping Services:Job Materials', **overrides):
+    txn = {**_TXN, **overrides}
+    row = GeneralLedgerConverter().create_transaction_row(txn, account_name)
+    return [c['value'] for c in row['colData']]
+
+
+def test_stored_row_has_nine_cells():
+    assert len(_cells()) == 9
+
+
+def test_each_cell_holds_its_named_field():
+    c = _cells()
+    assert c[DATE] == '01/14/2023'
+    assert c[TX_TYPE] == 'Bill Payment (Check)'
+    assert c[NUM] == '1023'
+    assert c[NAME] == 'Hahn Group'
+    assert c[MEMO] == 'monthly service'
+    assert c[SPLIT] == 'Accounts Payable (A/P)'
+    assert c[AMOUNT] == '-891.20'
+    assert c[TXID] == '1412'
+
+
+def test_account_cell_holds_the_leaf_not_the_path():
+    # The section header carries "Landscaping Services:Job Materials";
+    # each row under it carries "Job Materials".
+    assert _cells()[ACCOUNT] == 'Job Materials'
+    assert _cells('Checking')[ACCOUNT] == 'Checking'
+
+
+def test_dates_stay_month_day_year():
+    # The readers match ^\d{1,2}/\d{1,2}/\d{4}$; ISO is rejected.
+    assert re.match(r'^\d{2}/\d{2}/\d{4}$', _cells()[DATE])
+
+
+def test_an_iso_date_is_normalised_rather_than_passed_through():
+    assert _cells(date='2023-01-14')[DATE] == '01/14/2023'
+
+
+def test_amount_is_not_the_split_string():
+    # The specific confusion this layout caused downstream.
+    c = _cells()
+    assert float(c[AMOUNT]) == -891.20
+    assert 'Payable' in c[SPLIT]
+
+
+def test_no_balance_column_is_emitted():
+    # Stored rows carry no balance; the ninth cell is the transaction id.
+    assert '150209.78' not in _cells()
+
+
+def test_beginning_balance_row_keeps_its_own_shape():
+    row = GeneralLedgerConverter().create_transaction_row(
+        {'type': 'Beginning Balance', 'balance': '151,100.98'}, 'Checking')
+    c = [x['value'] for x in row['colData']]
+    assert len(c) == 9
+    assert c[0] == 'Beginning Balance'
+    assert c[7] == '151,100.98'
+    assert [c[i] for i in (1, 2, 3, 4, 5, 6, 8)] == [''] * 7
