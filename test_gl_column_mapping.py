@@ -9,6 +9,7 @@ Reproduces the Milano Hospitality GL failures:
   - Silent column misalignment when a 'Distribution account' column is present
     (date/amount/balance were read from the wrong columns)
 """
+import re
 import tempfile
 from pathlib import Path
 
@@ -142,3 +143,161 @@ if __name__ == '__main__':
     test_without_distribution_account_column()
     test_header_date_patterns()
     print("\nAll GL column-mapping regression tests passed.")
+
+
+# QuickBooks reuses a date, a transaction type and a blank Num across separate
+# transactions -- two sales tax payments on 2025-11-18 were indistinguishable,
+# so their cash rows could not be matched to their payable rows. The export's
+# Transaction ID column separates them.
+HEADER_WITH_TXN_ID = ['', 'Distribution account', 'Transaction date', 'Transaction type', 'Num',
+                      'Name', 'Memo/Description', 'Split', 'Amount', 'Balance', 'Transaction ID']
+
+
+def test_transaction_id_column_is_mapped():
+    converter = GeneralLedgerConverter()
+    colmap = converter.build_gl_column_map(HEADER_WITH_TXN_ID)
+    assert colmap['transaction_id'] == 10
+    # The columns it could have been confused with keep their own indices.
+    assert colmap['date'] == 2
+    assert colmap['type'] == 3
+    assert colmap['amount'] == 8
+
+
+def test_transaction_id_absent_is_not_an_error():
+    converter = GeneralLedgerConverter()
+    colmap = converter.build_gl_column_map(HEADER_WITH_DIST)
+    assert 'transaction_id' not in colmap
+    row = ['', 'Checking', '01/02/2023', 'Expense', '', '', '', 'Utilities', '-17.99', '100.00']
+    assert converter.extract_gl_transaction(row, colmap)['transaction_id'] == ''
+
+
+def test_transaction_id_reaches_the_emitted_row_as_the_last_cell():
+    converter = GeneralLedgerConverter()
+    colmap = converter.build_gl_column_map(HEADER_WITH_TXN_ID)
+    row = ['', 'Checking', '11/18/2025', 'Sales Tax Payment', '', '', 'Q1 Payment', '', '-38.40', '100.00', '2201']
+    tx = converter.extract_gl_transaction(row, colmap)
+    assert tx['transaction_id'] == '2201'
+    emitted = converter.create_transaction_row(tx)
+    # Appended, so the positions every existing reader depends on do not move.
+    assert emitted['colData'][-1]['value'] == '2201'
+    assert len(emitted['colData']) == 9
+
+
+def test_distribution_account_type_does_not_steal_the_transaction_type_column():
+    """The 41-column export repeats 'type' and 'name' in later headers."""
+    converter = GeneralLedgerConverter()
+    wide = ['', 'Distribution account', 'Transaction date', 'Transaction type', 'Num', 'Name',
+            'Description', 'Amount', 'Balance', 'Account name', 'Split', 'Account full name',
+            'Transaction ID', 'Distribution account type']
+    colmap = converter.build_gl_column_map(wide)
+    assert colmap['type'] == 3
+    assert colmap['name'] == 5
+    assert colmap['transaction_id'] == 12
+
+
+def test_currency_symbol_is_stripped_from_amount_and_balance():
+    """A "$0.00" distribution must reach readers as a parseable number.
+
+    QuickBooks writes a zero amount with a currency symbol and every other
+    amount without one, so the symbol appears on a minority of rows and a
+    reader that chokes on it loses only those rows -- silently.
+    """
+    c = GeneralLedgerConverter()
+    header = ['', 'Distribution account', 'Transaction date', 'Transaction type', 'Num',
+              'Name', 'Description', 'Split', 'Amount', 'Balance', 'Credit', 'Debit',
+              'Transaction ID']
+    colmap = c.build_gl_column_map(header)
+    row = ['', 'Accounts Receivable (A/R)', '01/09/2023', 'Invoice', '1414', 'Bergstrom LLC',
+           '', '', '$0.00', '-37,872.80', '', '$0.00', '1350']
+    tx = c.extract_gl_transaction(row, colmap)
+    assert tx['amount'] == '0.00'
+    assert tx['balance'] == '-37,872.80'
+    # AMOUNT is cell 7 in the stored layout; see TestStoredRowLayout below.
+    assert c.create_transaction_row(tx, 'Accounts Receivable (A/R)')['colData'][7]['value'] == '0.00'
+
+
+def test_negative_currency_amount_keeps_its_sign():
+    c = GeneralLedgerConverter()
+    assert c.gl_plain_number('-$137,888.32') == '-137,888.32'
+    assert c.gl_plain_number('') == ''
+
+
+# ── Stored DATA row layout ────────────────────────────────────────────────────
+# Verified against a stored record on 2026-10-02. These indices are asserted by
+# name because the report's own `columns` metadata does NOT describe them: it
+# declares eight columns starting at the date and ending with a balance, with no
+# account column at all. A consumer that derived its indices from that metadata
+# read the Split string as an amount.
+ACCOUNT, DATE, TX_TYPE, NUM, NAME, MEMO, SPLIT, AMOUNT, TXID = range(9)
+
+_TXN = {
+    'date': '01/14/2023',
+    'type': 'Bill Payment (Check)',
+    'num': '1023',
+    'name': 'Hahn Group',
+    'memo': 'monthly service',
+    'split_account': 'Accounts Payable (A/P)',
+    'amount': '-891.20',
+    'balance': '150209.78',
+    'transaction_id': '1412',
+}
+
+
+def _cells(account_name='Landscaping Services:Job Materials', **overrides):
+    txn = {**_TXN, **overrides}
+    row = GeneralLedgerConverter().create_transaction_row(txn, account_name)
+    return [c['value'] for c in row['colData']]
+
+
+def test_stored_row_has_nine_cells():
+    assert len(_cells()) == 9
+
+
+def test_each_cell_holds_its_named_field():
+    c = _cells()
+    assert c[DATE] == '01/14/2023'
+    assert c[TX_TYPE] == 'Bill Payment (Check)'
+    assert c[NUM] == '1023'
+    assert c[NAME] == 'Hahn Group'
+    assert c[MEMO] == 'monthly service'
+    assert c[SPLIT] == 'Accounts Payable (A/P)'
+    assert c[AMOUNT] == '-891.20'
+    assert c[TXID] == '1412'
+
+
+def test_account_cell_holds_the_leaf_not_the_path():
+    # The section header carries "Landscaping Services:Job Materials";
+    # each row under it carries "Job Materials".
+    assert _cells()[ACCOUNT] == 'Job Materials'
+    assert _cells('Checking')[ACCOUNT] == 'Checking'
+
+
+def test_dates_stay_month_day_year():
+    # The readers match ^\d{1,2}/\d{1,2}/\d{4}$; ISO is rejected.
+    assert re.match(r'^\d{2}/\d{2}/\d{4}$', _cells()[DATE])
+
+
+def test_an_iso_date_is_normalised_rather_than_passed_through():
+    assert _cells(date='2023-01-14')[DATE] == '01/14/2023'
+
+
+def test_amount_is_not_the_split_string():
+    # The specific confusion this layout caused downstream.
+    c = _cells()
+    assert float(c[AMOUNT]) == -891.20
+    assert 'Payable' in c[SPLIT]
+
+
+def test_no_balance_column_is_emitted():
+    # Stored rows carry no balance; the ninth cell is the transaction id.
+    assert '150209.78' not in _cells()
+
+
+def test_beginning_balance_row_keeps_its_own_shape():
+    row = GeneralLedgerConverter().create_transaction_row(
+        {'type': 'Beginning Balance', 'balance': '151,100.98'}, 'Checking')
+    c = [x['value'] for x in row['colData']]
+    assert len(c) == 9
+    assert c[0] == 'Beginning Balance'
+    assert c[7] == '151,100.98'
+    assert [c[i] for i in (1, 2, 3, 4, 5, 6, 8)] == [''] * 7
