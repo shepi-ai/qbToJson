@@ -442,7 +442,8 @@ class GeneralLedgerConverter(BaseConverter):
                     {"attributes": None, "value": "", "id": None, "href": None},
                     {"attributes": None, "value": "", "id": None, "href": None},
                     {"attributes": None, "value": "", "id": None, "href": None},
-                    {"attributes": None, "value": transaction_data.get('balance', ''), "id": None, "href": None}
+                    {"attributes": None, "value": transaction_data.get('balance', ''), "id": None, "href": None},
+                    {"attributes": None, "value": "", "id": None, "href": None}
                 ],
                 "type": "DATA",
                 "group": None
@@ -462,7 +463,10 @@ class GeneralLedgerConverter(BaseConverter):
                 {"attributes": None, "value": transaction_data.get('memo', ''), "id": None, "href": None},
                 {"attributes": None, "value": transaction_data.get('split_account', ''), "id": None, "href": None},
                 {"attributes": None, "value": transaction_data.get('amount', ''), "id": None, "href": None},
-                {"attributes": None, "value": transaction_data.get('balance', ''), "id": None, "href": None}
+                {"attributes": None, "value": transaction_data.get('balance', ''), "id": None, "href": None},
+                # Appended rather than inserted: every existing reader indexes
+                # these cells by position and ignores anything past the last one.
+                {"attributes": None, "value": transaction_data.get('transaction_id', ''), "id": None, "href": None}
             ],
             "type": "DATA",
             "group": None
@@ -525,7 +529,11 @@ class GeneralLedgerConverter(BaseConverter):
             label = str(cell if cell is not None else '').strip().lower()
             if not label:
                 continue
-            if 'date' in label:
+            # Checked before the substring tests below so a future header that
+            # happens to contain one of their words cannot claim it first.
+            if label in ('transaction id', 'txn id', 'transaction_id'):
+                field = 'transaction_id'
+            elif 'date' in label:
                 field = 'date'
             elif 'type' in label:
                 field = 'type'
@@ -563,9 +571,100 @@ class GeneralLedgerConverter(BaseConverter):
             'name': get('name'),
             'memo': get('memo'),
             'split_account': get('split_account'),
-            'amount': get('amount'),
-            'balance': get('balance'),
+            # QuickBooks reuses a date, a type and a blank Num across separate
+            # transactions, so only this identifies which rows belong together.
+            'transaction_id': get('transaction_id'),
+            'amount': self.gl_plain_number(get('amount')),
+            'balance': self.gl_plain_number(get('balance')),
         }
+
+    @staticmethod
+    def gl_plain_number(value: str) -> str:
+        """Drop the currency symbol QuickBooks prints on some amount cells.
+
+        One export writes a zero distribution as "$0.00" and every other amount
+        with no symbol at all. Readers of these cells accept a sign, digits,
+        commas and a decimal point, so a stray "$" made the value unparseable
+        -- and a row with an unparseable amount is skipped, not reported. The
+        section totals were already stripped this way; the rows were not.
+        """
+        return value.replace('$', '').strip() if value else value
+
+    # QuickBooks prints only an account's leaf name as a general ledger section
+    # header, so an income "Job Materials" and an expense "Job Materials" look
+    # identical and the later section used to overwrite the earlier one, taking
+    # every row with it. The export does carry the tree: an account closes its
+    # own rows with "Total for X" and, when it has children, closes the subtree
+    # with "Total for X with sub-accounts". Reading those markers back recovers
+    # the fully qualified path, which is what a chart of accounts keys on.
+    GL_SUBACCOUNT_TOTAL_RE = re.compile(r'^Total for (.+?) with sub-accounts\b')
+    GL_TOTAL_RE = re.compile(r'^Total for (.+?)\s*$')
+
+    @classmethod
+    def gl_parent_accounts(cls, first_cells: List[str]) -> set:
+        """Accounts that own sub-accounts, per the export's own subtree totals."""
+        parents = set()
+        for cell in first_cells:
+            match = cls.GL_SUBACCOUNT_TOTAL_RE.match(str(cell or '').strip())
+            if match:
+                parents.add(match.group(1).strip())
+        return parents
+
+    @classmethod
+    def gl_apply_total_line(cls, first_cell: str, stack: List[str], parents: set) -> bool:
+        """Advance the parent stack for a 'Total for ...' line.
+
+        Returns True when the line is a subtree total, which closes a parent
+        rather than reporting one account's own activity.
+        """
+        text = str(first_cell or '').strip()
+        subtree = cls.GL_SUBACCOUNT_TOTAL_RE.match(text)
+        if subtree:
+            closing = subtree.group(1).strip()
+            while stack and stack[-1] != closing:
+                stack.pop()
+            if stack:
+                stack.pop()
+            return True
+        own = cls.GL_TOTAL_RE.match(text)
+        if own:
+            name = own.group(1).strip()
+            # An account's own total precedes its children, so a parent opens a
+            # new nesting level here. A leaf never appears in `parents`.
+            if name in parents:
+                stack.append(name)
+        return False
+
+    @staticmethod
+    def gl_qualified_name(stack: List[str], leaf: str) -> str:
+        """Fully qualified account name, e.g. Landscaping Services:Job Materials."""
+        return ':'.join([*stack, leaf]) if stack else leaf
+
+    def gl_store_account(self, accounts_data: Dict[str, Any], account_name: str,
+                         account_id: str, transactions: List[Dict[str, Any]],
+                         total: float) -> None:
+        """Record one account's rows, merging rather than replacing on collision.
+
+        Two sections should only ever share a key if a format defeats the
+        hierarchy reconstruction. Merging keeps their rows instead of letting
+        the later section silently delete the earlier one.
+        """
+        existing = accounts_data.get(account_name)
+        if existing is None:
+            accounts_data[account_name] = {
+                'id': account_id,
+                'transactions': transactions,
+                'total': f"{total:.2f}",
+            }
+            return
+        print(f"⚠️  General ledger section {account_name!r} appears more than once; "
+              f"merging {len(transactions)} row(s) into the existing "
+              f"{len(existing['transactions'])}", file=sys.stderr)
+        existing['transactions'].extend(transactions)
+        try:
+            existing['total'] = f"{float(existing['total']) + total:.2f}"
+        except (TypeError, ValueError):
+            existing['total'] = f"{total:.2f}"
 
     def parse_csv(self, filepath: Path) -> Dict[str, Any]:
         """Parse CSV file and extract general ledger data"""
@@ -612,8 +711,13 @@ class GeneralLedgerConverter(BaseConverter):
             # Parse data rows
             current_account = None
             current_account_id = None
+            current_leaf = None
             current_transactions = []
             current_total = 0.0
+            parent_stack: List[str] = []
+            parents = self.gl_parent_accounts(
+                [r[0] if r else '' for r in rows[header_row_idx + 1:]]
+            )
 
             for row_idx in range(header_row_idx + 1, len(rows)):
                 row = rows[row_idx]
@@ -628,26 +732,31 @@ class GeneralLedgerConverter(BaseConverter):
                 if 'TOTAL' in first_cell.upper() and current_account is None:
                     continue
 
-                # Check if this is a new account section
-                if first_cell and len(row) > 1 and not any(row[1:]):
+                # Check if this is a new account section. Some exports pad the
+                # header row out to the full column count and some emit the
+                # account name on its own, so neither width can be required.
+                if first_cell and not any(str(cell).strip() for cell in row[1:]):
                     # This looks like an account header (only first cell has content)
                     # Save previous account data if exists
                     if current_account and current_transactions:
-                        accounts_data[current_account] = {
-                            'id': current_account_id,
-                            'transactions': current_transactions,
-                            'total': f"{current_total:.2f}"
-                        }
+                        self.gl_store_account(accounts_data, current_account,
+                                              current_account_id, current_transactions,
+                                              current_total)
 
-                    # Start new account
-                    current_account = first_cell
+                    # Start new account, qualified by its position in the tree
+                    current_leaf = first_cell
+                    current_account = self.gl_qualified_name(parent_stack, first_cell)
                     current_account_id = self.get_account_id(current_account)
                     current_transactions = []
                     current_total = 0.0
                     continue
 
-                # Check if this is a total row for current account
-                if current_account and first_cell.startswith(f"Total for {current_account}"):
+                # Check if this is a total row. Subtree totals close a parent and
+                # never report a single account's own activity.
+                if first_cell.startswith('Total for '):
+                    closed_subtree = self.gl_apply_total_line(first_cell, parent_stack, parents)
+                    if closed_subtree or not current_leaf or not first_cell.startswith(f"Total for {current_leaf}"):
+                        continue
                     # Extract total from the detected amount column
                     if len(row) > amount_col:
                         total_str = str(row[amount_col]).strip().replace(',', '').replace('$', '')
@@ -678,11 +787,9 @@ class GeneralLedgerConverter(BaseConverter):
 
             # Save last account
             if current_account and current_transactions:
-                accounts_data[current_account] = {
-                    'id': current_account_id,
-                    'transactions': current_transactions,
-                    'total': f"{current_total:.2f}"
-                }
+                self.gl_store_account(accounts_data, current_account,
+                                      current_account_id, current_transactions,
+                                      current_total)
 
         return {
             'period_info': period_info,
@@ -731,8 +838,13 @@ class GeneralLedgerConverter(BaseConverter):
         accounts_data = {}
         current_account = None
         current_account_id = None
+        current_leaf = None
         current_transactions = []
         current_total = 0.0
+        parent_stack: List[str] = []
+        parents = self.gl_parent_accounts([
+            (str(r[0]) if r and r[0] is not None else '') for r in rows[header_row_idx + 1:]
+        ])
 
         for row_idx in range(header_row_idx + 1, len(rows)):
             row = rows[row_idx]
@@ -753,21 +865,24 @@ class GeneralLedgerConverter(BaseConverter):
             if first_cell and len(row) > 1 and all(not cell.strip() for cell in row[1:]):
                 # Save previous account
                 if current_account and current_transactions:
-                    accounts_data[current_account] = {
-                        'id': current_account_id,
-                        'transactions': current_transactions,
-                        'total': f"{current_total:.2f}"
-                    }
+                    self.gl_store_account(accounts_data, current_account,
+                                          current_account_id, current_transactions,
+                                          current_total)
 
-                # Start new account
-                current_account = first_cell
+                # Start new account, qualified by its position in the tree
+                current_leaf = first_cell
+                current_account = self.gl_qualified_name(parent_stack, first_cell)
                 current_account_id = self.get_account_id(current_account)
                 current_transactions = []
                 current_total = 0.0
                 continue
 
-            # Check if this is a total row
-            if current_account and first_cell.startswith(f"Total for {current_account}"):
+            # Check if this is a total row. Subtree totals close a parent and
+            # never report a single account's own activity.
+            if first_cell.startswith('Total for '):
+                closed_subtree = self.gl_apply_total_line(first_cell, parent_stack, parents)
+                if closed_subtree or not current_leaf or not first_cell.startswith(f"Total for {current_leaf}"):
+                    continue
                 if len(row) > amount_col:
                     total_str = row[amount_col].strip().replace(',', '').replace('$', '')
                     if total_str:
@@ -796,11 +911,9 @@ class GeneralLedgerConverter(BaseConverter):
 
         # Save last account
         if current_account and current_transactions:
-            accounts_data[current_account] = {
-                'id': current_account_id,
-                'transactions': current_transactions,
-                'total': f"{current_total:.2f}"
-            }
+            self.gl_store_account(accounts_data, current_account,
+                                  current_account_id, current_transactions,
+                                  current_total)
 
         return {
             'period_info': period_info,

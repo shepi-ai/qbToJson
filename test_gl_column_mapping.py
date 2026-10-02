@@ -142,3 +142,79 @@ if __name__ == '__main__':
     test_without_distribution_account_column()
     test_header_date_patterns()
     print("\nAll GL column-mapping regression tests passed.")
+
+
+# QuickBooks reuses a date, a transaction type and a blank Num across separate
+# transactions -- two sales tax payments on 2025-11-18 were indistinguishable,
+# so their cash rows could not be matched to their payable rows. The export's
+# Transaction ID column separates them.
+HEADER_WITH_TXN_ID = ['', 'Distribution account', 'Transaction date', 'Transaction type', 'Num',
+                      'Name', 'Memo/Description', 'Split', 'Amount', 'Balance', 'Transaction ID']
+
+
+def test_transaction_id_column_is_mapped():
+    converter = GeneralLedgerConverter()
+    colmap = converter.build_gl_column_map(HEADER_WITH_TXN_ID)
+    assert colmap['transaction_id'] == 10
+    # The columns it could have been confused with keep their own indices.
+    assert colmap['date'] == 2
+    assert colmap['type'] == 3
+    assert colmap['amount'] == 8
+
+
+def test_transaction_id_absent_is_not_an_error():
+    converter = GeneralLedgerConverter()
+    colmap = converter.build_gl_column_map(HEADER_WITH_DIST)
+    assert 'transaction_id' not in colmap
+    row = ['', 'Checking', '01/02/2023', 'Expense', '', '', '', 'Utilities', '-17.99', '100.00']
+    assert converter.extract_gl_transaction(row, colmap)['transaction_id'] == ''
+
+
+def test_transaction_id_reaches_the_emitted_row_as_the_last_cell():
+    converter = GeneralLedgerConverter()
+    colmap = converter.build_gl_column_map(HEADER_WITH_TXN_ID)
+    row = ['', 'Checking', '11/18/2025', 'Sales Tax Payment', '', '', 'Q1 Payment', '', '-38.40', '100.00', '2201']
+    tx = converter.extract_gl_transaction(row, colmap)
+    assert tx['transaction_id'] == '2201'
+    emitted = converter.create_transaction_row(tx)
+    # Appended, so the positions every existing reader depends on do not move.
+    assert emitted['colData'][-1]['value'] == '2201'
+    assert len(emitted['colData']) == 9
+
+
+def test_distribution_account_type_does_not_steal_the_transaction_type_column():
+    """The 41-column export repeats 'type' and 'name' in later headers."""
+    converter = GeneralLedgerConverter()
+    wide = ['', 'Distribution account', 'Transaction date', 'Transaction type', 'Num', 'Name',
+            'Description', 'Amount', 'Balance', 'Account name', 'Split', 'Account full name',
+            'Transaction ID', 'Distribution account type']
+    colmap = converter.build_gl_column_map(wide)
+    assert colmap['type'] == 3
+    assert colmap['name'] == 5
+    assert colmap['transaction_id'] == 12
+
+
+def test_currency_symbol_is_stripped_from_amount_and_balance():
+    """A "$0.00" distribution must reach readers as a parseable number.
+
+    QuickBooks writes a zero amount with a currency symbol and every other
+    amount without one, so the symbol appears on a minority of rows and a
+    reader that chokes on it loses only those rows -- silently.
+    """
+    c = GeneralLedgerConverter()
+    header = ['', 'Distribution account', 'Transaction date', 'Transaction type', 'Num',
+              'Name', 'Description', 'Split', 'Amount', 'Balance', 'Credit', 'Debit',
+              'Transaction ID']
+    colmap = c.build_gl_column_map(header)
+    row = ['', 'Accounts Receivable (A/R)', '01/09/2023', 'Invoice', '1414', 'Bergstrom LLC',
+           '', '', '$0.00', '-37,872.80', '', '$0.00', '1350']
+    tx = c.extract_gl_transaction(row, colmap)
+    assert tx['amount'] == '0.00'
+    assert tx['balance'] == '-37,872.80'
+    assert c.create_transaction_row(tx)['colData'][6]['value'] == '0.00'
+
+
+def test_negative_currency_amount_keeps_its_sign():
+    c = GeneralLedgerConverter()
+    assert c.gl_plain_number('-$137,888.32') == '-137,888.32'
+    assert c.gl_plain_number('') == ''

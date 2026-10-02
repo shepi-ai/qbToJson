@@ -224,8 +224,13 @@ class AccountInferenceEngine:
                 "domain": "QBO",
                 "status": None,
                 "sparse": False,
-                "name": account_name,
-                "subAccount": False,
+                # General ledger sections are keyed by their fully qualified
+                # path (e.g. "Landscaping Services:Job Materials"), which is
+                # what keeps an income account distinct from an expense account
+                # that shares its leaf name. QuickBooks reports `name` as the
+                # leaf and carries the path in `fullyQualifiedName`.
+                "name": account_name.split(':')[-1],
+                "subAccount": ':' in account_name,
                 "parentRef": None,
                 "description": None,
                 "fullyQualifiedName": account_name,
